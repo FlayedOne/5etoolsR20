@@ -579,7 +579,7 @@ const betteR205etools = function () {
 		}
 		else d20plus.log("Not GM. Some functionality will be unavailable.");
 		d20plus.setSheet();
-        d20plus.addScripts(d20plus.onScriptLoad);
+		d20plus.addScripts(d20plus.onScriptLoad);
 
 		d20plus.showLoadingMessage(`betteR20-5etools v${d20plus.version}`);
 	};
@@ -1461,25 +1461,25 @@ const betteR205etools = function () {
 											"current": data.Vetoolscontent
 										}).save();
 
-                                        character.model.attribs.create({
+										character.model.attribs.create({
 											"name": `repeating_feat_${rowId}_roll_formula`,
 											"current": "{{content=@{content}}}"
 										}).save();
 
-                                        character.model.attribs.create({
+										character.model.attribs.create({
 											"name": `repeating_feat_${rowId}_toggle_details`,
 											"current": "1"
 										}).save();
 
-                                        /*
+										/*
 										character.model.attribs.create({
 											"name": `repeating_traits_${rowId}_source`,
 											"current": "Feat"
 										}).save();
-                                        */
+										*/
 
 										//character.model.view._updateSheetValues();
-                                        d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_feat_${rowId}_content_toggle`]);
+										d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_feat_${rowId}_content_toggle`]);
 									} else if (data.data.Category === "Backgrounds") { // TODO remove Background workaround when roll20 supports background drag-n-drop properly
 										const bg = data.Vetoolscontent;
 
@@ -1502,7 +1502,7 @@ const betteR205etools = function () {
 											name: `repeating_trait_${fRowId}_name`,
 											current: `${feature.name} (${bg.name})`
 										}).save();
-                                        /*
+										/*
 										character.model.attribs.create({
 											name: `repeating_traits_${fRowId}_source`,
 											current: "Background"
@@ -1511,66 +1511,66 @@ const betteR205etools = function () {
 											name: `repeating_traits_${fRowId}_source_type`,
 											current: bg.name
 										}).save();
-                                        */
+										*/
 										if (renderStack.length) {
-                                            character.model.attribs.create({
-                                                name: `repeating_trait_${fRowId}_content_toggle`,
-                                                current: "1"
-                                            }).save();
+											character.model.attribs.create({
+												name: `repeating_trait_${fRowId}_content_toggle`,
+												current: "1"
+											}).save();
 											character.model.attribs.create({
 												name: `repeating_trait_${fRowId}_content`,
 												current: d20plus.importer.getCleanText(renderStack.join(""))
 											}).save();
-                                            character.model.attribs.create({
-                                                name: `repeating_trait_${fRowId}_roll_formula`,
-                                                current: "{{content=@{content}}}"
-                                            }).save();
-                                            character.model.attribs.create({
-                                                name: `repeating_trait_${fRowId}_toggle_details`,
-                                                current: "1"
-                                            }).save();
+											character.model.attribs.create({
+												name: `repeating_trait_${fRowId}_roll_formula`,
+												current: "{{content=@{content}}}"
+											}).save();
+											character.model.attribs.create({
+												name: `repeating_trait_${fRowId}_toggle_details`,
+												current: "1"
+											}).save();
 										}
-                                        /*
+										/*
 										character.model.attribs.create({
 											name: `repeating_traits_${fRowId}_options-flag`,
 											current: "0"
 										}).save();
-                                        */
+										*/
 
 										if (bg.skillProficiencies) {
 											const skills = bg.skillProficiencies.split(",").map(s => s.toUpperCase().trim().replace(/ /g, ""));
 											skills.forEach(s => {
-                                                var skill_prof_attr_name = character.model.attribs.toJSON()
-                                                    .find(it => it.name.startsWith("repeating_skill_") && it.name.endsWith("_storage_name") && it.current == s)
-                                                    .name.replace(/_storage_name$/, "_proficiency");
+												var skill_prof_attr_name = character.model.attribs.toJSON()
+													.find(it => it.name.startsWith("repeating_skill_") && it.name.endsWith("_storage_name") && it.current == s)
+													.name.replace(/_storage_name$/, "_proficiency");
 												d20plus.importer.addOrUpdateAttr(character.model, skill_prof_attr_name, "proficient");
 											});
 										}
 
-                                        //character.model.view._updateSheetValues();
-                                        d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_trait_${fRowId}_content_toggle`]);
+										//character.model.view._updateSheetValues();
+										d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_trait_${fRowId}_content_toggle`]);
 									} else if (data.data.Category === "Races") { // TODO remove Race workaround when roll20 supports race drag-n-drop properly
 										const race = data.Vetoolscontent;
 
-                                        console.log(race);
+										console.log(race);
 
 										d20plus.importer.addOrUpdateAttr(character.model, `race`, race.name);
 										//d20plus.importer.addOrUpdateAttr(character.model, `race_display`, race.name);
 
-                                        //d20plus.importer.addOrUpdateAttr(character.model, `speed`, race.speed.walk);
-                                        d20plus.importer.addOrUpdateAttr(character.model, `speed_string`, Parser.getSpeedString(race));
-                                        for (locomotion of ["walk", "burrow", "climb", "fly", "swim"]) {
-                                            if (race.speed[locomotion]) {
-                                                const attr_name = locomotion == "walk" ? `speed` : `speed_${locomotion}`;
-                                                if (locomotion != "walk") {
-                                                    d20plus.importer.addOrUpdateAttr(character.model, `other_speeds`, "1");
-                                                }
-                                                // TODO cover fly / hover?
-                                                d20plus.importer.addOrUpdateAttr(character.model, attr_name, race.speed[locomotion]);
-                                            }
-                                        }
+										//d20plus.importer.addOrUpdateAttr(character.model, `speed`, race.speed.walk);
+										d20plus.importer.addOrUpdateAttr(character.model, `speed_string`, Parser.getSpeedString(race));
+										for (locomotion of ["walk", "burrow", "climb", "fly", "swim"]) {
+											if (race.speed[locomotion]) {
+												const attr_name = locomotion == "walk" ? `speed` : `speed_${locomotion}`;
+												if (locomotion != "walk") {
+													d20plus.importer.addOrUpdateAttr(character.model, `other_speeds`, "1");
+												}
+												// TODO cover fly / hover?
+												d20plus.importer.addOrUpdateAttr(character.model, attr_name, race.speed[locomotion]);
+											}
+										}
 
-                                        let newRowIds = [];
+										let newRowIds = [];
 										race.entries.forEach(e => {
 											const renderer = new EntryRenderer();
 											renderer.setBaseUrl(BASE_SITE_URL);
@@ -1578,12 +1578,12 @@ const betteR205etools = function () {
 											renderer.recursiveEntryRender({entries: e.entries}, renderStack);
 
 											const fRowId = d20plus.generateRowId();
-                                            newRowIds.push(fRowId);
+											newRowIds.push(fRowId);
 											character.model.attribs.create({
 												name: `repeating_racialtrait_${fRowId}_name`,
 												current: e.name
 											}).save();
-                                            /*
+											/*
 											character.model.attribs.create({
 												name: `repeating_traits_${fRowId}_source`,
 												current: "Race"
@@ -1592,7 +1592,7 @@ const betteR205etools = function () {
 												name: `repeating_traits_${fRowId}_source_type`,
 												current: race.name
 											}).save();
-                                            */
+											*/
 											character.model.attribs.create({
 												name: `repeating_racialtrait_${fRowId}_content`,
 												current: d20plus.importer.getCleanText(renderStack.join(""))
@@ -1603,28 +1603,30 @@ const betteR205etools = function () {
 											}).save();
 										});
 
-                                        const fRowId = d20plus.generateRowId();
-                                        character.model.attribs.create({
-                                            name: `repeating_modifier_${fRowId}_name`,
-                                            current: race.name
-                                        }).save();
-                                        character.model.attribs.create({
-                                            name: `repeating_modifier_${fRowId}_ability_score_toggle`,
-                                            current: "1"
-                                        }).save();
-                                        for (const a in race.ability) {
-                                            const value = race.ability[a];
-                                            const ability = Parser.attAbvToFull(a).toLowerCase();
+										const fRowId = d20plus.generateRowId();
+										character.model.attribs.create({
+											name: `repeating_modifier_${fRowId}_name`,
+											current: race.name
+										}).save();
+										character.model.attribs.create({
+											name: `repeating_modifier_${fRowId}_ability_score_toggle`,
+											current: "1"
+										}).save();
+										for (const a in race.ability) {
+											const value = race.ability[a];
+											const ability = Parser.attAbvToFull(a).toLowerCase();
 
-                                            character.model.attribs.create({
+											character.model.attribs.create({
 												name: `repeating_modifier_${fRowId}_${ability}_score_modifier`,
 												current: value
 											}).save();
-                                        }
+										}
 
-                                        d20.journal.notifyWorkersOfAttrChanges(character.model.id,
-                                                                               newRowIds.map(fRowId => `repeating_racialtrait_${fRowId}_content_toggle`)
-                                                                                        .concat(`repeating_modifier_${fRowId}_ability_score_toggle`));
+										d20.journal.notifyWorkersOfAttrChanges(
+											character.model.id,
+											newRowIds.map(fRowId => `repeating_racialtrait_${fRowId}_content_toggle`)
+												.concat(`repeating_modifier_${fRowId}_ability_score_toggle`)
+										);
 									} else if (data.data.Category === "Optional Features") { // TODO remove Invocation/Optional Feature workaround when roll20 supports invocation drag-n-drop properly
 										const optionalFeature = data.Vetoolscontent;
 										const renderer = new EntryRenderer();
@@ -1636,7 +1638,7 @@ const betteR205etools = function () {
 											name: `repeating_classfeature_${fRowId}_name`,
 											current: optionalFeature.name
 										}).save();
-                                        /*
+										/*
 										character.model.attribs.create({
 											name: `repeating_traits_${fRowId}_source`,
 											current: Parser.optFeatureTypeToFull(optionalFeature.featureType)
@@ -1645,7 +1647,7 @@ const betteR205etools = function () {
 											name: `repeating_traits_${fRowId}_source_type`,
 											current: optionalFeature.name
 										}).save();
-                                        */
+										*/
 										character.model.attribs.create({
 											name: `repeating_classfeature_${fRowId}_content`,
 											current: d20plus.importer.getCleanText(rendered)
@@ -1655,37 +1657,37 @@ const betteR205etools = function () {
 											current: "1"
 										}).save();
 
-                                        d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_classfeature_${fRowId}_content_toggle`]);
+										d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_classfeature_${fRowId}_content_toggle`]);
 									} else if (data.data.Category === "Classes") {
 										let levels = d20plus.getNumberRange("What levels?", 1, 20);
 										if (levels) {
 											const maxLevel = Math.max(...levels);
 
 											const clss = data.Vetoolscontent;
-                                            console.log(clss);
+											console.log(clss);
 
 											/*
-                                            setTimeout(() => {
+											setTimeout(() => {
 												d20plus.importer.addOrUpdateAttr(character.model, "pb", d20plus.getProfBonusFromLevel(Number(maxLevel)));
 												d20plus.importer.addOrUpdateAttr(character.model, "class", data.name);
 												d20plus.importer.addOrUpdateAttr(character.model, "level", maxLevel);
 												d20plus.importer.addOrUpdateAttr(character.model, "base_level", String(maxLevel));
 											}, 500);
-                                            */
+											*/
 
-                                            const fRowId = d20plus.generateRowId();
-                                            character.model.attribs.create({
-                                                name: `repeating_class_${fRowId}_name`,
-                                                current: clss.name.toUpperCase()
-                                            }).save();
-                                            character.model.attribs.create({
-                                                name: `repeating_class_${fRowId}_level`,
-                                                current: maxLevel
-                                            }).save();
+											const fRowId = d20plus.generateRowId();
+											character.model.attribs.create({
+												name: `repeating_class_${fRowId}_name`,
+												current: clss.name.toUpperCase()
+											}).save();
+											character.model.attribs.create({
+												name: `repeating_class_${fRowId}_level`,
+												current: maxLevel
+											}).save();
 
-                                            d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_class_${fRowId}_name`, `repeating_class_${fRowId}_level`]);
+											d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_class_${fRowId}_name`, `repeating_class_${fRowId}_level`]);
 
-                                            let newRowIds = [];
+											let newRowIds = [];
 											const renderer = EntryRenderer.getDefaultRenderer().setBaseUrl(BASE_SITE_URL);
 											for (let i = 0; i < maxLevel; i++) {
 												if (!levels.has(i + 1)) continue;
@@ -1699,12 +1701,12 @@ const betteR205etools = function () {
 														renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
 
 														const fRowId = d20plus.generateRowId();
-                                                        newRowIds.push(fRowId);
+														newRowIds.push(fRowId);
 														character.model.attribs.create({
 															name: `repeating_classfeature_${fRowId}_name`,
 															current: `${feature.name} (${clss.name} ${i + 1})`
 														}).save();
-                                                        /*
+														/*
 														character.model.attribs.create({
 															name: `repeating_traits_${fRowId}_source`,
 															current: "Class"
@@ -1713,7 +1715,7 @@ const betteR205etools = function () {
 															name: `repeating_traits_${fRowId}_source_type`,
 															current: `${clss.name} ${i + 1}`
 														}).save();
-                                                        */
+														*/
 														character.model.attribs.create({
 															name: `repeating_classfeature_${fRowId}_content`,
 															current: d20plus.importer.getCleanText(renderStack.join(""))
@@ -1726,8 +1728,10 @@ const betteR205etools = function () {
 												}
 											}
 
-                                            d20.journal.notifyWorkersOfAttrChanges(character.model.id,
-                                                                                   newRowIds.map(fRowId => `repeating_classfeature_${fRowId}_content_toggle`));
+											d20.journal.notifyWorkersOfAttrChanges(
+												character.model.id,
+												newRowIds.map(fRowId => `repeating_classfeature_${fRowId}_content_toggle`)
+											);
 										}
 									} else if (data.data.Category === "Subclasses") {
 										const sc = data.Vetoolscontent;
@@ -1761,7 +1765,7 @@ const betteR205etools = function () {
 											return;
 										}
 
-                                        let newRowIds = [];
+										let newRowIds = [];
 										const renderer = new EntryRenderer();
 										renderer.setBaseUrl(BASE_SITE_URL);
 										let firstFeatures = true;
@@ -1819,12 +1823,12 @@ const betteR205etools = function () {
 													renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
 
 													const fRowId = d20plus.generateRowId();
-                                                    newRowIds.push(fRowId);
+													newRowIds.push(fRowId);
 													character.model.attribs.create({
 														name: `repeating_classfeature_${fRowId}_name`,
 														current: `${feature.name} (${sc.name} ${gainLevels[i]})`
 													}).save();
-                                                    /*
+													/*
 													character.model.attribs.create({
 														name: `repeating_traits_${fRowId}_source`,
 														current: "Class"
@@ -1833,7 +1837,7 @@ const betteR205etools = function () {
 														name: `repeating_traits_${fRowId}_source_type`,
 														current: `${sc.class} (${sc.name} ${gainLevels[i]})`
 													}).save();
-                                                    */
+													*/
 													character.model.attribs.create({
 														name: `repeating_classfeature_${fRowId}_content`,
 														current: d20plus.importer.getCleanText(renderStack.join(""))
@@ -1848,8 +1852,10 @@ const betteR205etools = function () {
 											}
 										}
 
-                                        d20.journal.notifyWorkersOfAttrChanges(character.model.id,
-                                                                               newRowIds.map(fRowId => `repeating_classfeature_${fRowId}_content_toggle`));
+										d20.journal.notifyWorkersOfAttrChanges(
+											character.model.id,
+											newRowIds.map(fRowId => `repeating_classfeature_${fRowId}_content_toggle`)
+										);
 									} else if (data.data.Category === "Psionics") {
 										function makeSpellTrait (level, rowId, propName, content) {
 											character.model.attribs.create({
