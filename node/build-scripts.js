@@ -1,14 +1,14 @@
 const fs = require("fs");
 
-const SCRIPT_VERSION = "1.12.2";
+const SCRIPT_VERSION = "1.12.2.1";
 
 const HEADER_CORE = `// ==UserScript==
 // @name         betteR20-core
 // @namespace    https://rem.uz/
 // @license      MIT (https://opensource.org/licenses/MIT)
 // @version      ${SCRIPT_VERSION}
-// @updateURL    https://get.5e.tools/script/betteR20-core.user.js
-// @downloadURL  https://get.5e.tools/script/betteR20-core.user.js
+// @updateURL    https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-core.user.js
+// @downloadURL  https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-core.user.js
 // @description  Enhance your Roll20 experience
 // @author       TheGiddyLimit
 // @match        https://app.roll20.net/editor/
@@ -18,12 +18,12 @@ const HEADER_CORE = `// ==UserScript==
 `;
 
 const HEADER_5ETOOLS = `// ==UserScript==
-// @name         betteR20-5etools
+// @name         betteR20-5etools-shaped
 // @namespace    https://rem.uz/
 // @license      MIT (https://opensource.org/licenses/MIT)
 // @version      ${SCRIPT_VERSION}
-// @updateURL    https://get.5e.tools/script/betteR20-5etools.user.js
-// @downloadURL  https://get.5e.tools/script/betteR20-5etools.user.js
+// @updateURL    https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
+// @downloadURL  https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @description  Enhance your Roll20 experience
 // @author       5egmegaanon/astranauta/MrLabRat/TheGiddyLimit/DBAWiseMan/BDeveau/Remuz/Callador Julaan/Erogroth/Stormy
 // @match        https://app.roll20.net/editor/

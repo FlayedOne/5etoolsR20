@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         betteR20-5etools
+// @name         betteR20-5etools-shaped
 // @namespace    https://rem.uz/
 // @license      MIT (https://opensource.org/licenses/MIT)
-// @version      1.12.2
-// @updateURL    https://get.5e.tools/script/betteR20-5etools.user.js
-// @downloadURL  https://get.5e.tools/script/betteR20-5etools.user.js
+// @version      1.12.2.1
+// @updateURL    https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
+// @downloadURL  https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @description  Enhance your Roll20 experience
 // @author       5egmegaanon/astranauta/MrLabRat/TheGiddyLimit/DBAWiseMan/BDeveau/Remuz/Callador Julaan/Erogroth/Stormy
 // @match        https://app.roll20.net/editor/
