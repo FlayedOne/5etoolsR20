@@ -1484,18 +1484,29 @@ const betteR205etools = function () {
 										console.log(race);
 
 										d20plus.importer.addOrUpdateAttr(character.model, `race`, race.name);
-										//d20plus.importer.addOrUpdateAttr(character.model, `race_display`, race.name);
+										d20plus.importer.addOrUpdateAttr(character.model, `size`, Parser.sizeAbvToFull(race.size).toUpperCase());
 
 										//d20plus.importer.addOrUpdateAttr(character.model, `speed`, race.speed.walk);
 										d20plus.importer.addOrUpdateAttr(character.model, `speed_string`, Parser.getSpeedString(race));
-										for (locomotion of ["walk", "burrow", "climb", "fly", "swim"]) {
-											if (race.speed[locomotion]) {
-												const attr_name = locomotion == "walk" ? `speed` : `speed_${locomotion}`;
-												if (locomotion != "walk") {
-													d20plus.importer.addOrUpdateAttr(character.model, `other_speeds`, "1");
+										if (race.speed instanceof Object) {
+											for (locomotion of ["walk", "burrow", "climb", "fly", "swim"]) {
+												if (race.speed[locomotion]) {
+													const attr_name = locomotion == "walk" ? `speed` : `speed_${locomotion}`;
+													if (locomotion != "walk") {
+														d20plus.importer.addOrUpdateAttr(character.model, `other_speeds`, "1");
+													}
+													// TODO cover fly / hover?
+													d20plus.importer.addOrUpdateAttr(character.model, attr_name, race.speed[locomotion]);
 												}
-												// TODO cover fly / hover?
-												d20plus.importer.addOrUpdateAttr(character.model, attr_name, race.speed[locomotion]);
+											}
+										} else {
+											d20plus.importer.addOrUpdateAttr(character.model, `speed`, race.speed);
+										}
+
+										// really there seems to be only darkvision for PCs
+										for (vision of ["darkvision", "blindsight", "tremorsense", "truesight"]) {
+											if (race[vision]) {
+												d20plus.importer.addOrUpdateAttr(character.model, vision, race[vision]);
 											}
 										}
 
