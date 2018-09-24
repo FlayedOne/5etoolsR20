@@ -2,7 +2,7 @@
 // @name         betteR20-5etools-shaped
 // @namespace    https://rem.uz/
 // @license      MIT (https://opensource.org/licenses/MIT)
-// @version      1.12.2.2
+// @version      1.12.2.3
 // @updateURL    https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @downloadURL  https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @description  Enhance your Roll20 experience
@@ -1685,8 +1685,26 @@ const betteR205etools = function () {
 												d20plus.importer.addOrUpdateAttr(character.model, "base_level", String(maxLevel));
 											}, 500);
 											*/
+											const is_supported_class = clss.source == "PHB" || ["Artificer", "Ranger (Revised)"].includes(clss.name);
+											let class_name = "CUSTOM";
+											if (is_supported_class) {
+												class_name = clss.name.toUpperCase();
+												if (clss.name == "Ranger (Revised)")
+													class_name = "RANGERUA";
+											}
 
-											const fRowId = d20plus.generateRowId();
+											const class_name_attr = character.model.attribs.toJSON()
+												.find(it => it.name.startsWith("repeating_class_") && it.name.endsWith("_name") && it.current == class_name);
+
+											const fRowId = class_name_attr ? class_name_attr.name.replace(/^repeating_class_(.*)_name$/, "$1") : d20plus.generateRowId();
+											d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_name`, class_name);
+											d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_level`, maxLevel);
+											if (!is_supported_class) {
+												d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_hd`, `d${clss.hd.faces}`);
+												d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_custom_class_toggle`, "1");
+												d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_custom_name`, clss.name);
+											}
+											/*
 											character.model.attribs.create({
 												name: `repeating_class_${fRowId}_name`,
 												current: clss.name.toUpperCase()
@@ -1695,8 +1713,152 @@ const betteR205etools = function () {
 												name: `repeating_class_${fRowId}_level`,
 												current: maxLevel
 											}).save();
+											*/
 
 											d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_class_${fRowId}_name`, `repeating_class_${fRowId}_level`]);
+
+											const preFilledFeaturesByClass = {
+												"Artificer": [
+													"Magic Item Analysis",
+													"Tool Expertise",
+													"Wondrous Invention",
+													"Infuse Magic",
+													"Superior Attunement",
+													"Mechanical Servant",
+													"Soul of Artifice",
+												],
+												"Barbarian": [
+													"Rage",
+													"Unarmored Defense",
+													"Reckless Attack",
+													"Danger Sense",
+													"Extra Attack",
+													"Fast Movement",
+													"Feral Instinct",
+													"Brutal Critical",
+													"Relentless Rage",
+													"Persistent Rage",
+													"Indomitable Might",
+													"Primal Champion",
+												],
+												"Bard": [
+													"Bardic Inspiration",
+													"Jack of All Trades",
+													"Song of Rest",
+													"Expertise",
+													"Countercharm",
+													"Magical Secrets",
+													"Superior Inspiration",
+												],
+												"Cleric": [
+													"Channel Divinity",
+													"Turn Undead",
+													"Divine Intervention",
+												],
+												"Druid": [
+													"Druidic",
+													"Wild Shape",
+													"Timeless Body",
+													"Beast Spells",
+													"Archdruid",
+												],
+												"Fighter": [
+													"Fighting Style",
+													"Second Wind",
+													"Action Surge",
+													"Extra Attack",
+													"Indomitable",
+												],
+												"Monk": [
+													"Unarmored Defense",
+													"Martial Arts",
+													"Ki",
+													"Flurry of Blows",
+													"Patient Defense",
+													"Step of the Wind",
+													"Unarmored Movement",
+													"Deflect Missiles",
+													"Slow Fall",
+													"Extra Attack",
+													"Stunning Strike",
+													"Ki-Empowered Strikes",
+													"Evasion",
+													"Stillness of Mind",
+													"Purity of Body",
+													"Tongue of the Sun and Moon",
+													"Diamond Soul",
+													"Timeless Body",
+													"Empty Body",
+													"Perfect Soul",
+												],
+												"Paladin": [
+													"Divine Sense",
+													"Lay on Hands",
+													"Fighting Style",
+													"Divine Smite",
+													"Divine Health",
+													"Channel Divinity",
+													"Extra Attack",
+													"Aura of Protection",
+													"Aura of Courage",
+													"Improved Divine Smite",
+													"Cleansing Touch",
+												],
+												"Ranger": [
+													"Favored Enemy",
+													"Natural Explorer",
+													"Fighting Style",
+													"Primeval Awareness",
+													"Land’s Stride",
+													"Hide in Plain Sight",
+													"Vanish",
+													"Feral Senses",
+													"Foe Slayer",
+												],
+												"Ranger (Revised)": [ // "Ranger UA (2016)"
+													"Favored Enemy",
+													"Natural Explorer",
+													"Fighting Style",
+													"Primeval Awareness",
+													"Greater Favored Enemy",
+													"Fleet of Foot",
+													"Hide in Plain Sight",
+													"Vanish",
+													"Feral Senses",
+													"Foe Slayer",
+												],
+												"Rogue": [
+													"Expertise",
+													"Sneak Attack",
+													"Thieves' Cant",
+													"Cunning Action",
+													"Uncanny Dodge",
+													"Evasion",
+													"Reliable Talent",
+													"Blindsense",
+													"Slippery Mind",
+													"Elusive",
+													"Stroke of Luck",
+												],
+												"Sorcerer": [
+													"Sorcery Points",
+													"Flexible Casting",
+													"Metamagic",
+													"Sorcerous Restoration",
+												],
+												"Warlock": [
+													"Eldritch Invocations",
+													"Pact Boon",
+													"Mystic Arcanum",
+													"Eldritch Master",
+												],
+												"Wizard": [
+													"Arcane Recovery",
+													"Spell Mastery",
+													"Signature Spells",
+												],
+											};
+											const preFilledFeatures = preFilledFeaturesByClass[clss.name] || [];
 
 											let newRowIds = [];
 											const renderer = EntryRenderer.getDefaultRenderer().setBaseUrl(BASE_SITE_URL);
@@ -1707,7 +1869,7 @@ const betteR205etools = function () {
 												for (let j = 0; j < lvlFeatureList.length; j++) {
 													const feature = lvlFeatureList[j];
 													// don't add "you gain a subclass feature" or ASI's
-													if (!feature.gainSubclassFeature && feature.name !== "Ability Score Improvement") {
+													if (!feature.gainSubclassFeature && feature.name !== "Ability Score Improvement" && !preFilledFeatures.includes(feature.name)) {
 														const renderStack = [];
 														renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
 
