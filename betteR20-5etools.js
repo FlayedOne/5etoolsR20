@@ -1644,6 +1644,38 @@ const betteR205etools = function () {
 											}).save();
 											*/
 
+											if (!is_supported_class && clss.name == "Mystic") {
+												const classResourcesForLevel = clss.classTableGroups[0].rows[maxLevel - 1];
+												const [talentsKnown, disciplinesKnown, psiPoints, psiLimit] = classResourcesForLevel;
+
+												d20plus.importer.addOrUpdateAttr(character.model, "spell_points_name", "PSI");
+												d20plus.importer.addOrUpdateAttr(character.model, "show_spells", "1");
+												d20plus.importer.addOrUpdateAttr(character.model, "spell_points_toggle", "1");
+												d20plus.importer.addOrUpdateAttr(character.model, "spell_ability", "INTELLIGENCE");
+												d20plus.importer.addOrUpdateAttr(character.model, "spell_points_limit", psiLimit);
+
+												const attrId = d20plus.importer.findAttrId(character.model, "spell_points");
+												if (attrId) {
+													character.model.attribs.get(attrId).set({
+														current: psiPoints,
+														max: psiPoints
+													}).save();
+												} else {
+													character.model.attribs.create({
+														name: "spell_points",
+														current: psiPoints,
+														max: psiPoints
+													}).save();
+												}
+
+												for (let i = 1; i <= 7; i++) {
+													d20plus.importer.addOrUpdateAttr(character.model, `spell_level_${i}_cost`, i);
+												}
+												for (let i = 0; i <= maxLevel; i++) {
+													d20plus.importer.addOrUpdateAttr(character.model, `spell_level_filter_${i}`, "1");
+												}
+											}
+
 											d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_class_${fRowId}_name`, `repeating_class_${fRowId}_level`]);
 
 											const preFilledFeaturesByClass = {
