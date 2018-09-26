@@ -1991,6 +1991,8 @@ const betteR205etools = function () {
 											newRowIds.map(fRowId => `repeating_classfeature_${fRowId}_content_toggle`)
 										);
 									} else if (data.data.Category === "Psionics") {
+										data = data.Vetoolscontent;
+
 										let newAttrNames = [];
 
 										function makeSpellTrait (level, rowId, propName, content) {
@@ -4594,10 +4596,14 @@ const betteR205etools = function () {
 
 		const renderer = new EntryRenderer();
 		renderer.setBaseUrl(BASE_SITE_URL);
-		data.data = {
-			Category: "Psionics"
+		const r20json = {
+			"name": data.name,
+			"Vetoolscontent": data,
+			"data": {
+				"Category": "Psionics"
+			}
 		};
-		const gmNotes = JSON.stringify(data);
+		const gmNotes = JSON.stringify(r20json);
 
 		const baseNoteContents = `
 			<h3>${data.name}</h3>
