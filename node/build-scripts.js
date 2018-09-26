@@ -1,6 +1,6 @@
 const fs = require("fs");
 
-const SCRIPT_VERSION = "1.12.2.3";
+const SCRIPT_VERSION = "1.12.2.4";
 
 const HEADER_CORE = `// ==UserScript==
 // @name         betteR20-core
@@ -25,7 +25,7 @@ const HEADER_5ETOOLS = `// ==UserScript==
 // @updateURL    https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @downloadURL  https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @description  Enhance your Roll20 experience
-// @author       5egmegaanon/astranauta/MrLabRat/TheGiddyLimit/DBAWiseMan/BDeveau/Remuz/Callador Julaan/Erogroth/Stormy
+// @author       5egmegaanon/astranauta/MrLabRat/TheGiddyLimit/DBAWiseMan/BDeveau/Remuz/Callador Julaan/Erogroth/Stormy/FlayedOne
 // @match        https://app.roll20.net/editor/
 // @grant        unsafeWindow
 // @run-at       document-start
