@@ -2,7 +2,7 @@
 // @name         betteR20-5etools-shaped
 // @namespace    https://rem.uz/
 // @license      MIT (https://opensource.org/licenses/MIT)
-// @version      1.12.2.4
+// @version      1.12.2.5
 // @updateURL    https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @downloadURL  https://github.com/FlayedOne/5etoolsR20/raw/quick-n-dirty-shaped-support/dist/betteR20-5etools.user.js
 // @description  Enhance your Roll20 experience
@@ -57,6 +57,8 @@ Object.defineProperty = function (obj, prop, vals) {
 	}
 };
 
+UPPER_CANVAS_MOUSEDOWN_LIST = [];
+UPPER_CANVAS_MOUSEMOVE_LIST = [];
 UPPER_CANVAS_MOUSEDOWN = null;
 UPPER_CANVAS_MOUSEMOVE = null;
 EventTarget.prototype.addEventListenerBase = EventTarget.prototype.addEventListener;
@@ -64,9 +66,6778 @@ EventTarget.prototype.addEventListener = function(type, listener, options, ...ot
 	if (typeof d20 !== "undefined") {
 		if (type === "mousedown" && this === d20.engine.uppercanvas) UPPER_CANVAS_MOUSEDOWN = listener;
 		if (type === "mousemove" && this === d20.engine.uppercanvas) UPPER_CANVAS_MOUSEMOVE = listener;
+	} else {
+		if (type === "mousedown") UPPER_CANVAS_MOUSEDOWN_LIST.push({listener, on: this});
+		if (type === "mousemove") UPPER_CANVAS_MOUSEMOVE_LIST.push({listener, on: this});
 	}
 	this.addEventListenerBase(type, listener, options, ...others);
 };
+
+
+function baseJsLoad () {
+	d20plus.js = {};
+
+	d20plus.js.scripts = [
+		{name: "listjs", url: "https://raw.githubusercontent.com/javve/list.js/v1.5.0/dist/list.min.js"},
+		{name: "5etoolsUtils", url: `${SITE_JS_URL}utils.js`}
+	];
+	d20plus.js.apiScripts = [
+		{name: "VecMath", url: "https://raw.githubusercontent.com/Roll20/roll20-api-scripts/master/Vector%20Math/1.0/VecMath.js"},
+		{name: "MatrixMath", url: "https://raw.githubusercontent.com/Roll20/roll20-api-scripts/master/MatrixMath/1.0/matrixMath.js"},
+		{name: "PathMath", url: "https://raw.githubusercontent.com/Roll20/roll20-api-scripts/master/PathMath/1.5/PathMath.js"}
+	];
+
+	d20plus.js.addScripts = (onLoadFunction) => {
+		d20plus.ut.log("Add JS");
+		const onEachLoadFunction = function (name, url, js) {
+			d20plus.js._addScript(name, js);
+		};
+		d20plus.js.chainLoad(d20plus.js.scripts, 0, onEachLoadFunction, (...args) => {
+			onLoadFunction(...args);
+
+			const cached = DataUtil.loadJSON;
+			DataUtil.loadJSON = (...args) => {
+				if (args.length > 0 && typeof args[0] === "string" && args[0].startsWith("data/")) {
+					args[0] = BASE_SITE_URL + args[0];
+				}
+				return cached.bind(DataUtil)(...args);
+			};
+		});
+	};
+
+	d20plus.js.addApiScripts = (onLoadFunction) => {
+		d20plus.ut.log("Add Builtin API Scripts");
+		const onEachLoadFunction = function (name, url, js) {
+			d20plus.js._addScript(name, js);
+		};
+		d20plus.js.chainLoad(d20plus.js.apiScripts, 0, onEachLoadFunction, onLoadFunction);
+	};
+
+	d20plus.js._addScript = (name, js) => {
+		return new Promise((resolve, reject) => {
+			try {
+				window.eval(js);
+				d20plus.ut.log(`JS [${name}] Loaded`);
+				resolve()
+			} catch (e) {
+				d20plus.ut.log(`Error loading [${name}]`);
+				d20plus.ut.log(e);
+				reject(e);
+			}
+		})
+	};
+
+	d20plus.js.chainLoad = (toLoads, index, onEachLoadFunction, onFinalLoadFunction) => {
+		const toLoad = toLoads[index];
+		// on loading the last item, run onLoadFunction
+		d20plus.js.loadWithRetries(
+			toLoad.name,
+			toLoad.url,
+			(data) => {
+				if (index === toLoads.length - 1) {
+					onEachLoadFunction(toLoad.name, toLoad.url, data);
+					onFinalLoadFunction();
+				} else {
+					onEachLoadFunction(toLoad.name, toLoad.url, data);
+					d20plus.js.chainLoad(toLoads, index + 1, onEachLoadFunction, onFinalLoadFunction);
+				}
+			}
+		);
+	};
+
+	d20plus.js.loadWithRetries = (name, url, onSuccess) => {
+		let retries = 3;
+		function withRetries () {
+			return new Promise((resolve, reject) => {
+				$.ajax({
+					type: "GET",
+					url: `${url}${d20plus.ut.getAntiCacheSuffix()}${retries}`,
+					success: function (data) {
+						resolve(data);
+					},
+					error: function (resp, qq, pp) {
+						if (resp && resp.status >= 400 && retries-- > 0) {
+							console.error(resp, qq, pp);
+							d20plus.ut.log(`Error loading ${name}; retrying`);
+							setTimeout(() => {
+								withRetries().then((data) => onSuccess(data));
+							}, 500);
+						} else {
+							console.error(resp, qq, pp);
+							d20plus.ut.log(`Error loading ${name}`);
+							reject(resp, qq, pp);
+						}
+					}
+				});
+			})
+		}
+
+		withRetries().then((data) => onSuccess(data));
+	};
+}
+
+SCRIPT_EXTENSIONS.push(baseJsLoad);
+
+
+function baseQpi () {
+	const qpi = {
+		_version: "0.01-pre-pre-alpha",
+		_: {
+			log: {
+				_ (...args) {
+					qpi._log(...args)
+				},
+				works: 1
+			},
+
+			// Campaign: { // FIXME this overwrites the window's campaign, which breaks stuff
+			// 	_ () {
+			// 		return Campaign;
+			// 	},
+			// 	works: 0
+			// },
+
+			on: {
+				_preInit () {
+					qpi._on_chatHandlers = [];
+					const seenMessages = new Set();
+					d20.textchat.chatref = d20.textchat.shoutref.parent().child("chat");
+					const handleChat = (e) => {
+						if (!d20.textchat.chatstartingup) {
+							e.id = e.key();
+							if (!seenMessages.has(e.id)) {
+								seenMessages.add(e.id);
+
+								var t = e.val();
+								if (t) {
+									if (window.DEBUG) console.log("CHAT: ", t);
+
+									qpi._on_chatHandlers.forEach(fn => fn(t));
+								}
+							}
+						}
+					};
+					d20.textchat.chatref.on("child_added", handleChat);
+					d20.textchat.chatref.on("child_changed", handleChat);
+				},
+				_ (evtType, fn, ...others) {
+					switch (evtType) {
+						case "chat:message":
+							qpi._on_chatHandlers.push(fn);
+							break;
+						default:
+							console.error("Unhandled message type: ", evtType, "with args", fn, others)
+							break;
+					}
+				},
+				works: 0.01,
+				notes: [
+					`"chat:message" is the only available event.`
+				]
+			},
+
+			createObj: {
+				_ (objType, obj, ...others) {
+					switch (objType) {
+						case "path": {
+							const page = d20.Campaign.pages._byId[obj._pageid];
+							obj.scaleX = obj.scaleX || 1;
+							obj.scaleY = obj.scaleY || 1;
+							obj.path = obj.path || obj._path
+							return page.thepaths.create(obj)
+							break;
+						}
+						default:
+							console.error("Unhandled object type: ", objType, "with args", obj, others)
+							break;
+					}
+				},
+				works: 0.01,
+				notes: [
+					`Only supports "path" obects.`
+				]
+			},
+
+			sendChat: { // TODO lift code from doChatInput
+				_ (speakingAs, input, callback, options) {
+					const message = {
+						who: speakingAs,
+						type: "general",
+						content: input,
+						playerid: window.currentPlayer.id,
+						avatar: null,
+						inlinerolls: []
+					};
+
+					const key = d20.textchat.chatref.push().key();
+					d20.textchat.chatref.child(key).setWithPriority(message, Firebase.ServerValue.TIMESTAMP)
+				},
+				works: 0.01,
+				notes: [
+					`speakingAs: String only.`,
+					`input: String only.`,
+					`callback: Unimplemented.`,
+					`options: Unimplemented.`,
+					`Messages are always sent with the player ID of the QPI user.`
+				]
+			},
+
+			// findObjs: {
+			// 	_ (attrs) {
+			// 		// TODO
+			// 		// const getters = {
+			// 		// 	attribute: () => {},
+			// 		// 	character: () => {},
+			// 		// 	handout: () => {}
+			// 		// };
+			// 		// const getAll = () => {
+			// 		// 	const out = [];
+			// 		// 	Object.values(getters).forEach(fn => out.push(...fn()));
+			// 		// 	return out;
+			// 		// };
+			//
+			// 		// let out = attrs._type ? getters[attrs._type]() : getAll();
+			//
+			// 		throw new Error("findObjs is unimplemented!");
+			// 	},
+			// 	works: 0.00,
+			// 	notes: [
+			// 		`Unimplemented.`
+			// 	]
+			// }
+		},
+
+		_loadedScripts: null,
+		_init () {
+			Object.keys(qpi._).forEach(k => {
+				const it = qpi._[k];
+				if (it._preInit) it._preInit();
+				window[k] = it._;
+			});
+
+			qpi._loadedScripts = StorageUtil.get("VeQpi") || {};
+
+			$(`body`).append(`
+				<div id="qpi-manager" title="QPI Script Manager - v${qpi._version}">
+					<div class="qpi-table"></div>
+					<div>
+						<input placeholder="URL*" class="qpi-url">
+						<button class="btn qpi-add-url">Add URL</button>
+					</div>
+					<hr>
+					<div>
+						<input placeholder="Name*" class="qpi-name">
+						<button class="btn qpi-add-text">Load Script</button>
+						<br>
+						<textarea class="qpi-text" style="width: 100%; height: 300px; resize: vertical;"></textarea>
+					</div>
+					<hr>
+					<button class="btn qpi-help">Help/README</button> <i>Note that this tool is a for-testing faceplate over some internal code. It is intended for internal use only.</i>
+				</div>	
+			`);
+			$(`#qpi-manager`).dialog({
+				autoOpen: false,
+				resizable: true,
+				width: 800,
+				height: 600,
+			});
+
+			$(`body`).append(`
+				<div id="qpi-manager-readme" title="QPI README - v${qpi._version}">
+					<div class="qpi-readme"></div>
+				</div>	
+			`);
+			$(`#qpi-manager-readme`).dialog({
+				autoOpen: false,
+				resizable: true,
+				width: 800,
+				height: 600,
+			});
+
+			qpi._log("Initialised!");
+		},
+
+		man (name) {
+			if (!name) {
+				qpi._log(`Showing all...\n==== Available API Mimics ====\n  - ${Object.keys(qpi._).join("()\n  - ")}()`);
+				return;
+			}
+
+			const found = Object.keys(qpi._).find(k => k === name);
+			if (!found) qpi._log(`No mimic with ${name} found -- perhaps it's unimplemented?`);
+			else {
+				const it = qpi._[found];
+				qpi._log(`Showing "${name}"...\n==== ${name} :: ${it.works * 100}% functional ====\n${(it.notes || []).join("\n")}`);
+			}
+		},
+
+		_manHtml () {
+			let stack = "";
+			Object.keys(qpi._).forEach(k => {
+				stack += `<h5>${k}</h5>`;
+				const it = qpi._[k];
+				stack += `<p><i>Estimated ${it.works * 100}% functional</i><br>${(it.notes || []).join("<br>")}</p>`;
+			});
+			return stack;
+		},
+
+		_openManager () {
+			const $win = $(`#qpi-manager`);
+
+			$win.find(`.qpi-help`).off("click").on("click", () => {
+				const $winReadme = $(`#qpi-manager-readme`);
+				$winReadme.dialog("open");
+
+				$winReadme.find(`.qpi-readme`).html(qpi._manHtml());
+			});
+
+			$win.find(`.qpi-add-url`).off("click").on("click", () => {
+				const url = $win.find(`.qpi-url`).val();
+				if (url && script.trim()) {
+					qpi._log(`Attempting to load: "${url}"`);
+					d20plus.js.loadWithRetries(
+						url,
+						url,
+						(data) => {
+							d20plus.js._addScript(url, data).then(() => {
+								alert("Loaded successfully!");
+								$win.find(`.qpi-url`).val("");
+							}).catch(() => {
+								alert("Failed to load script! See the console for more details (CTRL-SHIFT-J on Chrome)");
+							});
+						}
+					)
+				} else {
+					alert("Please enter a URL!");
+				}
+			});
+
+			$win.find(`.qpi-add-text`).off("click").on("click", () => {
+				const name = $win.find(`.qpi-name`).val();
+				const script = $win.find(`.qpi-text`).val();
+				if (name && script && name.trim() && script.trim()) {
+					qpi._log(`Attempting to eval user script: ${name}`);
+					d20plus.js._addScript(name, script).then(() => {
+						alert("Loaded successfully!");
+						$win.find(`.qpi-name`).val("");
+						$win.find(`.qpi-text`).val("");
+					}).catch(() => {
+						alert("Failed to load script! See the console for more details (CTRL-SHIFT-J on Chrome)");
+					});
+				} else {
+					alert("Please enter a name and some code!");
+				}
+			});
+
+			$win.dialog("open");
+		},
+
+		_log (...args) {
+			console.log("%cQPI > ", "color: #ff00ff; font-size: large", ...args);
+		}
+	};
+	window.qpi = qpi;
+
+	d20plus.qpi = {};
+	d20plus.qpi.initMockApi = () => { // TODO check if this needs to be enabled for players too
+		d20plus.ut.log("Initialising mock API");
+		qpi._init();
+	};
+}
+
+SCRIPT_EXTENSIONS.push(baseQpi);
+
+
+function baseUtil () {
+	d20plus.ut = {};
+
+	d20plus.ut.log = (...args) => {
+		console.log("%cD20Plus > ", "color: #3076b9; font-size: large", ...args);
+	};
+
+	d20plus.ut.chatLog = (arg) => {
+		d20.textchat.incoming(
+			false,
+			{
+				who: "5e.tools",
+				type: "general",
+				content: (arg || "").toString(),
+				playerid: window.currentPlayer.id,
+				id: d20plus.ut.generateRowId(),
+				target: window.currentPlayer.id,
+				avatar: "https://5e.tools/icon.png"
+			}
+		);
+	};
+
+	d20plus.ut.ascSort = (a, b) => {
+		if (b === a) return 0;
+		return b < a ? 1 : -1;
+	};
+
+	d20plus.ut.disable3dDice = () => {
+		d20plus.ut.log("Disabling 3D dice");
+		const $cb3dDice = $(`#enable3ddice`);
+		$cb3dDice.prop("checked", false).attr("disabled", true)
+			.attr("title", "3D dice are incompatible with betteR20. We apologise for any inconvenience caused.");
+
+		d20.tddice.canRoll3D = () => false;
+	};
+
+	d20plus.ut.checkVersion = () => {
+		function cmpVersions (a, b) {
+			const regExStrip0 = /(\.0+)+$/;
+			const segmentsA = a.replace(regExStrip0, '').split('.');
+			const segmentsB = b.replace(regExStrip0, '').split('.');
+			const l = Math.min(segmentsA.length, segmentsB.length);
+
+			for (let i = 0; i < l; i++) {
+				const diff = parseInt(segmentsA[i], 10) - parseInt(segmentsB[i], 10);
+				if (diff) {
+					return diff;
+				}
+			}
+			return segmentsA.length - segmentsB.length;
+		}
+
+		d20plus.ut.log("Checking current version");
+		$.ajax({
+			url: `https://get.5e.tools`,
+			success: (data) => {
+				const m = /<!--\s*(\d+\.\d+\.\d+)\s*-->/.exec(data);
+				if (m) {
+					const curr = d20plus.version;
+					const avail = m[1];
+					const cmp = cmpVersions(curr, avail);
+					if (cmp < 0) {
+						setTimeout(() => {
+							d20plus.ut.sendHackerChat(`A newer version of the script is available. Get ${avail} <a href="https://get.5e.tools/">here</a>.`);
+						}, 1000);
+					}
+				}
+			},
+			error: () => {
+				d20plus.ut.log("Failed to check version");
+			}
+		})
+	};
+
+	d20plus.ut.chatTag = (message) => {
+		d20plus.ut.sendHackerChat(`
+				${message} initialised.
+				${window.enhancementSuiteEnabled ? `<br><br>Roll20 Enhancement Suite detected.` : ""}
+				<br>
+				<br>
+				Need help? Join our <a href="https://discord.gg/AzyBjtQ">Discord</a>.
+				<br>
+				<br>
+				<span title="You'd think this would be obvious.">
+				Please DO NOT post about this script or any related content in official channels, including the Roll20 forums.
+				<br>
+				<br>
+				Before reporting a bug on the Roll20 forums, please disable the script and check if the problem persists. 
+				</span>
+			`);
+	};
+
+	d20plus.ut.showLoadingMessage = (message) => {
+		d20plus.ut.sendHackerChat(`
+				${message} initialising, please wait...<br><br>
+			`);
+	};
+
+	d20plus.ut.sendHackerChat = (message) => {
+		d20.textchat.incoming(false, ({
+			who: "system",
+			type: "system",
+			content: `<span class="hacker-chat">
+					${message}
+				</span>`
+		}));
+	};
+
+	d20plus.ut.addCSS = (sheet, selector, rules) => {
+		const index = sheet.cssRules.length;
+		if ("insertRule" in sheet) {
+			sheet.insertRule(selector + "{" + rules + "}", index);
+		} else if ("addRule" in sheet) {
+			sheet.addRule(selector, rules, index);
+		}
+	};
+
+	d20plus.ut.addAllCss = () => {
+		d20plus.ut.log("Add CSS");
+		const targetSheet =  [...window.document.styleSheets]
+			.filter(it => it.href && (!it.href.startsWith("moz-extension") && !it.href.startsWith("chrome-extension")))
+			.find(it => it.href.includes("app.css"));
+
+		_.each(d20plus.css.baseCssRules, function (r) {
+			d20plus.ut.addCSS(targetSheet, r.s, r.r);
+		});
+		if (!window.is_gm) {
+			_.each(d20plus.css.baseCssRulesPlayer, function (r) {
+				d20plus.ut.addCSS(targetSheet, r.s, r.r);
+			});
+		}
+		_.each(d20plus.css.cssRules, function (r) {
+			d20plus.ut.addCSS(targetSheet, r.s, r.r);
+		});
+	};
+
+	d20plus.ut.getAntiCacheSuffix = () => {
+		return "?" + (new Date()).getTime();
+	};
+
+	d20plus.ut.generateRowId = () => {
+		return window.generateUUID().replace(/_/g, "Z");
+	};
+
+	d20plus.ut.randomRoll = (roll, success, error) => {
+		d20.textchat.diceengine.process(roll, success, error);
+	};
+
+	d20plus.ut.getJournalFolderObj = () => {
+		d20.journal.refreshJournalList();
+		let journalFolder = d20.Campaign.get("journalfolder");
+		if (journalFolder === "") {
+			d20.journal.addFolderToFolderStructure("Characters");
+			d20.journal.refreshJournalList();
+			journalFolder = d20.Campaign.get("journalfolder");
+		}
+		return JSON.parse(journalFolder);
+	};
+
+	d20plus.ut._lastInput = null;
+	d20plus.ut.getNumberRange = (promptText, min, max) => {
+		function alertInvalid () {
+			alert("Please enter a valid range.");
+		}
+
+		function isOutOfRange (num) {
+			return num < min || num > max;
+		}
+
+		function addToRangeVal (range, num) {
+			range.add(num);
+		}
+
+		function addToRangeLoHi (range, lo, hi) {
+			for (let i = lo; i <= hi; ++i) {
+				range.add(i);
+			}
+		}
+
+		function alertOutOfRange () {
+			alert(`Please enter numbers in the range ${min}-${max} (inclusive).`);
+		}
+
+		while (true) {
+			const res =  prompt(promptText, d20plus.ut._lastInput || "E.g. 1-5, 8, 11-13");
+			if (res && res.trim()) {
+				d20plus.ut._lastInput = res;
+				const clean = res.replace(/\s*/g, "");
+				if (/^((\d+-\d+|\d+),)*(\d+-\d+|\d+)$/.exec(clean)) {
+					const parts = clean.split(",");
+					const out = new Set();
+					let failed = false;
+
+					for (const part of parts) {
+						if (part.includes("-")) {
+							const spl = part.split("-");
+							const numLo = Number(spl[0]);
+							const numHi = Number(spl[1]);
+
+							if (isNaN(numLo) || isNaN(numHi) || numLo === 0 || numHi === 0 || numLo > numHi) {
+								alertInvalid();
+								failed = true;
+								break;
+							}
+
+							if (isOutOfRange(numLo) || isOutOfRange(numHi)) {
+								alertOutOfRange();
+								failed = true;
+								break;
+							}
+
+							if (numLo === numHi) {
+								addToRangeVal(out, numLo);
+							} else {
+								addToRangeLoHi(out, numLo, numHi);
+							}
+						} else {
+							const num = Number(part);
+							if (isNaN(num) || num === 0) {
+								alertInvalid();
+								failed = true;
+								break;
+							} else {
+								if (isOutOfRange(num)) {
+									alertOutOfRange();
+									failed = true;
+									break;
+								}
+								addToRangeVal(out, num);
+							}
+						}
+					}
+
+					if (!failed) {
+						d20plus.ut._lastInput = null;
+						return out;
+					}
+				} else {
+					alertInvalid();
+				}
+			} else {
+				d20plus.ut._lastInput = null;
+				return null;
+			}
+		}
+	};
+
+	d20plus.ut.getTokenFromId = (tokenId) => {
+		const foundTokenArr = d20.Campaign.pages.models.map(model => model.thegraphics.models.find(it => it.id === tokenId)).filter(it => it);
+		if (foundTokenArr.length) {
+			return foundTokenArr[0];
+		}
+		return null;
+	};
+
+	d20plus.math = {
+		/**
+		 * Normalize a 2d vector.
+		 * @param out Result storage
+		 * @param a Vector to normalise
+		 */
+		normalize (out, a) {
+			const x = a[0],
+				y = a[1];
+			let len = x*x + y*y;
+			if (len > 0) {
+				len = 1 / Math.sqrt(len);
+				out[0] = a[0] * len;
+				out[1] = a[1] * len;
+			}
+			return out;
+		},
+
+		/**
+		 * Scale a 2d vector.
+		 * @param out Resulst storage
+		 * @param a Vector to scale
+		 * @param b Value to scale by
+		 */
+		scale (out, a, b) {
+			out[0] = a[0] * b;
+			out[1] = a[1] * b;
+			return out;
+		}
+	};
+
+	d20plus.ut._BYTE_UNITS = [' kB', ' MB', ' GB', ' TB', 'PB', 'EB', 'ZB', 'YB'];
+	d20plus.ut.getReadableFileSizeString = (fileSizeInBytes) => {
+		let i = -1;
+		do {
+			fileSizeInBytes = fileSizeInBytes / 1024;
+			i++;
+		} while (fileSizeInBytes > 1024);
+		return Math.max(fileSizeInBytes, 0.1).toFixed(1) + d20plus.ut._BYTE_UNITS[i];
+	};
+
+
+	// based on:
+	/*! @source http://purl.eligrey.com/github/FileSaver.js/blob/master/src/FileSaver.js */
+	d20plus.ut.saveAs = function() {
+		const view = window;
+		var
+			doc = view.document
+			// only get URL when necessary in case Blob.js hasn't overridden it yet
+			, get_URL = function() {
+				return view.URL || view.webkitURL || view;
+			}
+			, save_link = doc.createElementNS("http://www.w3.org/1999/xhtml", "a")
+			, can_use_save_link = "download" in save_link
+			, click = function(node) {
+				var event = new MouseEvent("click");
+				node.dispatchEvent(event);
+			}
+			, is_safari = /constructor/i.test(view.HTMLElement) || view.safari
+			, is_chrome_ios =/CriOS\/[\d]+/.test(navigator.userAgent)
+			, setImmediate = view.setImmediate || view.setTimeout
+			, throw_outside = function(ex) {
+				setImmediate(function() {
+					throw ex;
+				}, 0);
+			}
+			, force_saveable_type = "application/octet-stream"
+			// the Blob API is fundamentally broken as there is no "downloadfinished" event to subscribe to
+			, arbitrary_revoke_timeout = 1000 * 40 // in ms
+			, revoke = function(file) {
+				var revoker = function() {
+					if (typeof file === "string") { // file is an object URL
+						get_URL().revokeObjectURL(file);
+					} else { // file is a File
+						file.remove();
+					}
+				};
+				setTimeout(revoker, arbitrary_revoke_timeout);
+			}
+			, dispatch = function(filesaver, event_types, event) {
+				event_types = [].concat(event_types);
+				var i = event_types.length;
+				while (i--) {
+					var listener = filesaver["on" + event_types[i]];
+					if (typeof listener === "function") {
+						try {
+							listener.call(filesaver, event || filesaver);
+						} catch (ex) {
+							throw_outside(ex);
+						}
+					}
+				}
+			}
+			, auto_bom = function(blob) {
+				// prepend BOM for UTF-8 XML and text/* types (including HTML)
+				// note: your browser will automatically convert UTF-16 U+FEFF to EF BB BF
+				if (/^\s*(?:text\/\S*|application\/xml|\S*\/\S*\+xml)\s*;.*charset\s*=\s*utf-8/i.test(blob.type)) {
+					return new Blob([String.fromCharCode(0xFEFF), blob], {type: blob.type});
+				}
+				return blob;
+			}
+			, FileSaver = function(blob, name, no_auto_bom) {
+				if (!no_auto_bom) {
+					blob = auto_bom(blob);
+				}
+				// First try a.download, then web filesystem, then object URLs
+				var
+					filesaver = this
+					, type = blob.type
+					, force = type === force_saveable_type
+					, object_url
+					, dispatch_all = function() {
+						dispatch(filesaver, "writestart progress write writeend".split(" "));
+					}
+					// on any filesys errors revert to saving with object URLs
+					, fs_error = function() {
+						if ((is_chrome_ios || (force && is_safari)) && view.FileReader) {
+							// Safari doesn't allow downloading of blob urls
+							var reader = new FileReader();
+							reader.onloadend = function() {
+								var url = is_chrome_ios ? reader.result : reader.result.replace(/^data:[^;]*;/, 'data:attachment/file;');
+								var popup = view.open(url, '_blank');
+								if(!popup) view.location.href = url;
+								url=undefined; // release reference before dispatching
+								filesaver.readyState = filesaver.DONE;
+								dispatch_all();
+							};
+							reader.readAsDataURL(blob);
+							filesaver.readyState = filesaver.INIT;
+							return;
+						}
+						// don't create more object URLs than needed
+						if (!object_url) {
+							object_url = get_URL().createObjectURL(blob);
+						}
+						if (force) {
+							view.location.href = object_url;
+						} else {
+							var opened = view.open(object_url, "_blank");
+							if (!opened) {
+								// Apple does not allow window.open, see https://developer.apple.com/library/safari/documentation/Tools/Conceptual/SafariExtensionGuide/WorkingwithWindowsandTabs/WorkingwithWindowsandTabs.html
+								view.location.href = object_url;
+							}
+						}
+						filesaver.readyState = filesaver.DONE;
+						dispatch_all();
+						revoke(object_url);
+					};
+				filesaver.readyState = filesaver.INIT;
+
+				if (can_use_save_link) {
+					object_url = get_URL().createObjectURL(blob);
+					setImmediate(function() {
+						save_link.href = object_url;
+						save_link.download = name;
+						click(save_link);
+						dispatch_all();
+						revoke(object_url);
+						filesaver.readyState = filesaver.DONE;
+					}, 0);
+					return;
+				}
+
+				fs_error();
+			}
+			, FS_proto = FileSaver.prototype
+			, saveAs = function(blob, name, no_auto_bom) {
+				return new FileSaver(blob, name || blob.name || "download", no_auto_bom);
+			};
+		// IE 10+ (native saveAs)
+		if (typeof navigator !== "undefined" && navigator.msSaveOrOpenBlob) {
+			return function(blob, name, no_auto_bom) {
+				name = name || blob.name || "download";
+
+				if (!no_auto_bom) {
+					blob = auto_bom(blob);
+				}
+				return navigator.msSaveOrOpenBlob(blob, name);
+			};
+		}
+		FS_proto.abort = function(){};
+		FS_proto.readyState = FS_proto.INIT = 0;
+		FS_proto.WRITING = 1;
+		FS_proto.DONE = 2;
+		FS_proto.error =
+			FS_proto.onwritestart =
+				FS_proto.onprogress =
+					FS_proto.onwrite =
+						FS_proto.onabort =
+							FS_proto.onerror =
+								FS_proto.onwriteend =
+									null;
+
+		return saveAs;
+	}();
+}
+
+SCRIPT_EXTENSIONS.push(baseUtil);
+
+
+function baseConfig() {
+	d20plus.cfg = {current: {}};
+
+	d20plus.cfg.loadConfigFailed = false;
+
+	d20plus.cfg.loadConfig = (nextFn) => {
+		d20plus.ut.log("Reading Config");
+		let configHandout = d20plus.cfg.getConfigHandout();
+
+		if (!configHandout) {
+			d20plus.ut.log("No config found! Initialising new config...");
+			d20plus.cfg.makeDefaultConfig(doLoad);
+		} else {
+			doLoad();
+		}
+
+		function doLoad () {
+			configHandout = d20plus.cfg.getConfigHandout();
+			if (configHandout) {
+				configHandout.view.render();
+				configHandout._getLatestBlob("gmnotes", function (gmnotes) {
+					try {
+						const decoded = decodeURIComponent(gmnotes);
+
+						d20plus.cfg.current = JSON.parse(decoded);
+
+						d20plus.ut.log("Config Loaded:");
+						d20plus.ut.log(d20plus.cfg.current);
+						nextFn();
+					} catch (e) {
+						if (!d20plus.cfg.loadConfigFailed) {
+							// prevent infinite loops
+							d20plus.cfg.loadConfigFailed = true;
+
+							d20plus.ut.log("Corrupted config! Rebuilding...");
+							d20plus.cfg.makeDefaultConfig(() => {
+								d20plus.cfg.loadConfig(nextFn)
+							});
+						} else {
+							// if the config fails, continue to load anyway
+							nextFn();
+						}
+					}
+				});
+			} else {
+				d20plus.ut.log("Failed to create config handout!");
+				nextFn();
+			}
+		}
+	};
+
+	d20plus.cfg.loadPlayerConfig = (nextFn) => {
+		d20plus.ut.log("Reading player Config");
+		const loaded = StorageUtil.get(`Veconfig`);
+		if (!loaded) {
+			d20plus.ut.log("No player config found! Initialising new config...");
+			const dfltConfig = d20plus.cfg.getDefaultConfig();
+			d20plus.cfg.current = Object.assign(d20plus.cfg.current, dfltConfig);
+			StorageUtil.set(`Veconfig`, d20plus.cfg.current);
+		}
+		d20plus.ut.log("Player config Loaded:");
+		d20plus.ut.log(d20plus.cfg.current);
+		nextFn();
+	};
+
+	d20plus.cfg.makeDefaultConfig = (nextFn) => {
+		d20.Campaign.handouts.create({
+			name: CONFIG_HANDOUT
+		}, {
+			success: function (handout) {
+				notecontents = "The GM notes contain config options saved between sessions. If you want to wipe your saved settings, delete this handout and reload roll20. If you want to edit your settings, click the \"Edit Config\" button in the <b>Settings</b> (cog) panel.";
+
+				// default settings
+				// token settings mimic official content; other settings as vanilla as possible
+				const gmnotes = JSON.stringify(d20plus.cfg.getDefaultConfig());
+
+				handout.updateBlobs({notes: notecontents, gmnotes: gmnotes});
+				handout.save({notes: (new Date).getTime(), inplayerjournals: ""});
+
+				if (nextFn) nextFn();
+			}
+		});
+	};
+
+	d20plus.cfg.getConfigHandout = () => {
+		d20plus.ut.getJournalFolderObj(); // ensure journal init
+
+		return d20.Campaign.handouts.models.find(function (handout) {
+			return handout.attributes.name === CONFIG_HANDOUT;
+		});
+	};
+
+	d20plus.cfg.getCfgKey = (group, val) => {
+		if (val === undefined || d20plus.cfg.current[group] === undefined) return undefined;
+		const gr = d20plus.cfg.current[group];
+		for (const key of Object.keys(d20plus.cfg.current[group])) {
+			if (gr[key] !== undefined && gr[key] === val) {
+				return key;
+			}
+		}
+		return undefined;
+	};
+
+	d20plus.cfg.getRawCfgVal = (group, key) => {
+		if (d20plus.cfg.current[group] === undefined) return undefined;
+		if (d20plus.cfg.current[group][key] === undefined) return undefined;
+		return d20plus.cfg.current[group][key];
+	};
+
+	d20plus.cfg.getCfgVal = (group, key) => {
+		if (d20plus.cfg.current[group] === undefined) return undefined;
+		if (d20plus.cfg.current[group][key] === undefined) return undefined;
+		if (CONFIG_OPTIONS[group][key]._type === "_SHEET_ATTRIBUTE") {
+			if (!NPC_SHEET_ATTRIBUTES[d20plus.cfg.current[group][key]]) return undefined;
+			return NPC_SHEET_ATTRIBUTES[d20plus.cfg.current[group][key]][d20plus.sheet];
+		}
+		if (CONFIG_OPTIONS[group][key]._type === "_SHEET_ATTRIBUTE_PC") {
+			if (!PC_SHEET_ATTRIBUTES[d20plus.cfg.current[group][key]]) return undefined;
+			return PC_SHEET_ATTRIBUTES[d20plus.cfg.current[group][key]][d20plus.sheet];
+		}
+		return d20plus.cfg.current[group][key];
+	};
+
+	d20plus.cfg.getCfgDefaultVal = (group, key) => {
+		if (CONFIG_OPTIONS[group] === undefined) return undefined;
+		if (CONFIG_OPTIONS[group][key] === undefined) return undefined;
+		return CONFIG_OPTIONS[group][key].default
+	};
+
+	d20plus.cfg.getCfgEnumVals = (group, key) => {
+		if (CONFIG_OPTIONS[group] === undefined) return undefined;
+		if (CONFIG_OPTIONS[group][key] === undefined) return undefined;
+		return CONFIG_OPTIONS[group][key]._values
+	};
+
+	d20plus.cfg.getDefaultConfig = () => {
+		const outCpy = {};
+		$.each(CONFIG_OPTIONS, (sectK, sect) => {
+			if (window.is_gm || sect._player) {
+				outCpy[sectK] = outCpy[sectK] || {};
+				$.each(sect, (k, data) => {
+					if (!k.startsWith("_") && (window.is_gm || data._player)) {
+						outCpy[sectK][k] = data.default;
+					}
+				});
+			}
+		});
+		return outCpy;
+	};
+
+	// Helpful for checking if a boolean option is set even if false
+	d20plus.cfg.hasCfgVal = (group, key) => {
+		if (d20plus.cfg.current[group] === undefined) return undefined;
+		return d20plus.cfg.current[group][key] !== undefined;
+	};
+
+	d20plus.cfg.setCfgVal = (group, key, val) => {
+		if (d20plus.cfg.current[group] === undefined) d20plus.cfg.current[group] = {};
+		d20plus.cfg.current[group][key] = val;
+	};
+
+	d20plus.cfg.makeTabPane = ($addTo, headers, content) => {
+		if (headers.length !== content.length) throw new Error("Tab header and content length were not equal!");
+
+		if ($addTo.attr("hastabs") !== "YES") {
+			const $tabBar = $(`<ul class="nav nav-tabs"/>`);
+
+			const tabList = [];
+			const paneList = [];
+			const $tabPanes = $(`<div class="tabcontent"/>`);
+
+			$.each(content, (i, e) => {
+				const toAdd = $(`<div class="plustab${i} tab-pane" ${i === 0 ? "" : `style="display: none"`}/>`);
+				toAdd.append(e);
+				paneList[i] = toAdd;
+				$tabPanes.append(toAdd);
+			});
+
+			$.each(headers, (i, e) => {
+				const toAdd = $(`<li ${i === 0 ? `class="active"` : ""}><a data-tab="plustab${i}" href="#">${e}</a></li>`).on("click", () => {
+					paneList.forEach((p, i2) => {
+						if (i2 === i) {
+							tabList[i2].addClass("active");
+							paneList[i2].show();
+						} else {
+							tabList[i2].removeClass("active");
+							paneList[i2].hide();
+						}
+					});
+				});
+				tabList[i] = (toAdd);
+				$tabBar.append(toAdd);
+			});
+
+			$addTo
+				.append($tabBar)
+				.append($tabPanes);
+
+			$addTo.attr("hastabs", "YES");
+		}
+	};
+
+	d20plus.cfg.openConfigEditor = () => {
+		const cEdit = $("#d20plus-configeditor");
+		cEdit.dialog("open");
+
+		if (cEdit.attr("hastabs") !== "YES") {
+			cEdit.attr("hastabs", "YES");
+			const appendTo = $(`<div/>`);
+			cEdit.prepend(appendTo);
+
+			const configFields = {};
+
+			let sortedKeys = Object.keys(CONFIG_OPTIONS).sort((a, b) => d20plus.ut.ascSort(CONFIG_OPTIONS[a]._name, CONFIG_OPTIONS[b]._name));
+			if (!window.is_gm) sortedKeys = sortedKeys.filter(k => CONFIG_OPTIONS[k]._player);
+
+			const tabList = sortedKeys.map(k => CONFIG_OPTIONS[k]._name);
+			const contentList = sortedKeys.map(k => makeTab(k));
+
+			function makeTab (cfgK) {
+				const cfgGroup = CONFIG_OPTIONS[cfgK];
+				configFields[cfgK] = {};
+
+				const content = $(`
+						<div class="config-table-wrapper">
+							<table class="config-table">
+								<thead><tr><th>Property</th><th>Value</th></tr></thead>
+								<tbody></tbody>
+							</table>
+						</div>
+					`);
+				const tbody = content.find(`tbody`);
+
+				let sortedTabKeys = Object.keys(cfgGroup).filter(k => !k.startsWith("_"));
+				if (!window.is_gm) sortedTabKeys = sortedTabKeys.filter(k => cfgGroup[k]._player);
+
+				sortedTabKeys.forEach((grpK, idx) => {
+					const prop = cfgGroup[grpK];
+
+					// IDs only used for label linking
+					const toAdd = $(`<tr><td><label for="conf_field_${idx}" class="config-name">${prop.name}</label></td></tr>`);
+
+					// Each config `_type` should have a case here. Each case should add a function to the map [configFields:[cfgK:grpK]]. These functions should return the value of the input.
+					switch (prop._type) {
+						case "boolean": {
+							const field = $(`<input type="checkbox" id="conf_field_${idx}" ${d20plus.cfg.getCfgVal(cfgK, grpK) ? `checked` : ""}>`);
+
+							configFields[cfgK][grpK] = () => {
+								return field.prop("checked")
+							};
+
+							const td = $(`<td/>`).append(field);
+							toAdd.append(td);
+							break;
+						}
+						case "String": {
+							const curr = d20plus.cfg.getCfgVal(cfgK, grpK) || "";
+							const def = d20plus.cfg.getCfgDefaultVal(cfgK, grpK) || "";
+							const field = $(`<input id="conf_field_${idx}" value="${curr}" ${def ? `placeholder="Default: ${def}"` : ""}>`);
+
+							configFields[cfgK][grpK] = () => {
+								return field.val() ? field.val().trim() : "";
+							};
+
+							const td = $(`<td/>`).append(field);
+							toAdd.append(td);
+							break;
+						}
+						case "_SHEET_ATTRIBUTE_PC":
+						case "_SHEET_ATTRIBUTE": {
+							const DICT = prop._type === "_SHEET_ATTRIBUTE" ? NPC_SHEET_ATTRIBUTES : PC_SHEET_ATTRIBUTES;
+							const sortedNpcsAttKeys = Object.keys(DICT).sort((at1, at2) => d20plus.ut.ascSort(DICT[at1].name, DICT[at2].name));
+							const field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${sortedNpcsAttKeys.map(npcK => `<option value="${npcK}">${DICT[npcK].name}</option>`)}</select>`);
+							const cur = d20plus.cfg.getCfgVal(cfgK, grpK);
+							if (cur !== undefined) {
+								field.val(cur);
+							}
+
+							configFields[cfgK][grpK] = () => {
+								return field.val()
+							};
+
+							const td = $(`<td/>`).append(field);
+							toAdd.append(td);
+							break;
+						}
+						case "float":
+						case "integer": {
+							const def = d20plus.cfg.getCfgDefaultVal(cfgK, grpK);
+							const curr = d20plus.cfg.getCfgVal(cfgK, grpK);
+							const field = $(`<input id="conf_field_${idx}" type="number" ${curr != null ? `value="${curr}"` : ""} ${def != null ? `placeholder="Default: ${def}"` : ""} step="any">`);
+
+							configFields[cfgK][grpK] = () => {
+								return Number(field.val());
+							};
+
+							const td = $(`<td/>`).append(field);
+							toAdd.append(td);
+							break;
+						}
+						case "_FORMULA": {
+							const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.formulas._options.sort().map(opt => `<option value="${opt}">${opt}</option>`)}</select>`);
+
+							const cur = d20plus.cfg.getCfgVal(cfgK, grpK);
+							if (cur !== undefined) {
+								$field.val(cur);
+							}
+
+							configFields[cfgK][grpK] = () => {
+								return $field.val();
+							};
+
+							const td = $(`<td/>`).append($field);
+							toAdd.append(td);
+							break;
+						}
+						case "_WHISPERMODE": {
+							const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.whisperModes.map(mode => `<option value="${mode}">${mode}</option>`)}</select>`);
+
+							const cur = d20plus.cfg.getCfgVal(cfgK, grpK);
+							if (cur !== undefined) {
+								$field.val(cur);
+							}
+
+							configFields[cfgK][grpK] = () => {
+								return $field.val();
+							};
+
+							const td = $(`<td/>`).append($field);
+							toAdd.append(td);
+							break;
+						}
+						case "_ADVANTAGEMODE": {
+							const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.advantageModes.map(mode => `<option value="${mode}">${mode}</option>`)}</select>`);
+
+							const cur = d20plus.cfg.getCfgVal(cfgK, grpK);
+							if (cur !== undefined) {
+								$field.val(cur);
+							}
+
+							configFields[cfgK][grpK] = () => {
+								return $field.val();
+							};
+
+							const td = $(`<td/>`).append($field);
+							toAdd.append(td);
+							break;
+						}
+						case "_DAMAGEMODE": {
+							const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.damageModes.map(mode => `<option value="${mode}">${mode}</option>`)}</select>`);
+
+							const cur = d20plus.cfg.getCfgVal(cfgK, grpK);
+							if (cur !== undefined) {
+								$field.val(cur);
+							}
+
+							configFields[cfgK][grpK] = () => {
+								return $field.val();
+							};
+
+							const td = $(`<td/>`).append($field);
+							toAdd.append(td);
+							break;
+						}
+						case "_enum": { // for generic String enums not covered above
+							const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.cfg.getCfgEnumVals(cfgK, grpK).map(it => `<option value="${it}">${it}</option>`)}</select>`);
+
+							const cur = d20plus.cfg.getCfgVal(cfgK, grpK);
+							if (cur !== undefined) {
+								$field.val(cur);
+							} else {
+								const def = d20plus.cfg.getCfgDefaultVal(cfgK, grpK);
+								if (def !== undefined) {
+									$field.val(def);
+								}
+							}
+
+							configFields[cfgK][grpK] = () => {
+								return $field.val();
+							};
+
+							const td = $(`<td/>`).append($field);
+							toAdd.append(td);
+							break;
+						}
+					}
+					tbody.append(toAdd);
+				});
+
+				return content;
+			}
+
+			d20plus.cfg.makeTabPane(
+				appendTo,
+				tabList,
+				contentList
+			);
+
+			const saveButton = $(`#configsave`);
+			saveButton.unbind("click");
+			saveButton.bind("click", () => {
+				function _updateLoadedConfig () {
+					$.each(configFields, (cfgK, grp) => {
+						$.each(grp, (grpK, grpVField) => {
+							d20plus.cfg.setCfgVal(cfgK, grpK, grpVField());
+						})
+					});
+				}
+
+				if (window.is_gm) {
+					let handout = d20plus.cfg.getConfigHandout();
+					if (!handout) {
+						d20plus.cfg.makeDefaultConfig(doSave);
+					} else {
+						doSave();
+					}
+
+					function doSave () {
+						_updateLoadedConfig();
+
+						const gmnotes = JSON.stringify(d20plus.cfg.current).replace(/%/g, "%25");
+						handout.updateBlobs({gmnotes: gmnotes});
+						handout.save({notes: (new Date).getTime()});
+
+						d20plus.ut.log("Saved config");
+
+						d20plus.cfg.baseHandleConfigChange();
+						if (d20plus.handleConfigChange) d20plus.handleConfigChange();
+					}
+				} else {
+					_updateLoadedConfig();
+					StorageUtil.set(`Veconfig`, d20plus.cfg.current);
+					d20plus.cfg.baseHandleConfigChange();
+					if (d20plus.handleConfigChange) d20plus.handleConfigChange();
+				}
+			});
+		}
+	};
+
+	d20plus.cfg._handleStatusTokenConfigChange = () => {
+		if (window.is_gm) {
+			if (d20plus.cfg.getCfgVal("token", "enhanceStatus")) {
+				const sheetUrl = d20plus.cfg.getCfgVal("token", "statusSheetUrl") || d20plus.cfg.getCfgDefaultVal("token", "statusSheetUrl");
+				const sheetSmallUrl = d20plus.cfg.getCfgVal("token", "statusSheetSmallUrl") || d20plus.cfg.getCfgDefaultVal("token", "statusSheetSmallUrl");
+
+				window.Campaign && window.Campaign.save({
+					"bR20cfg_statussheet": sheetUrl,
+					"bR20cfg_statussheet_small": sheetSmallUrl
+				});
+
+				d20.token_editor.statussheet.src = sheetUrl;
+				d20.token_editor.statussheet_small.src =  sheetSmallUrl;
+				d20plus.engine._removeStatusEffectEntries(); // clean up any old data
+				d20plus.engine._addStatusEffectEntries();
+			} else {
+				window.Campaign && window.Campaign.save({
+					"bR20cfg_statussheet": "",
+					"bR20cfg_statussheet_small": ""
+				});
+
+				d20.token_editor.statussheet.src = "/images/statussheet.png";
+				d20.token_editor.statussheet_small.src = "/images/statussheet_small.png";
+				d20plus.engine._removeStatusEffectEntries();
+			}
+		} else {
+			if (window.Campaign && window.Campaign.attributes && window.Campaign.attributes.bR20cfg_statussheet && window.Campaign.attributes.bR20cfg_statussheet_small) {
+				d20.token_editor.statussheet.src = window.Campaign.attributes.bR20cfg_statussheet;
+				d20.token_editor.statussheet_small.src =  window.Campaign.attributes.bR20cfg_statussheet_small;
+				d20plus.engine._addStatusEffectEntries();
+			} else {
+				d20.token_editor.statussheet.src = "/images/statussheet.png";
+				d20.token_editor.statussheet_small.src = "/images/statussheet_small.png";
+				d20plus.engine._removeStatusEffectEntries();
+			}
+		}
+	};
+
+	d20plus.cfg.baseHandleConfigChange = () => {
+		d20plus.cfg._handleStatusTokenConfigChange();
+		if (d20plus.cfg.hasCfgVal("interface", "toolbarOpacity")) {
+			const v = Math.max(Math.min(Number(d20plus.cfg.getCfgVal("interface", "toolbarOpacity")), 1), 0);
+			$(`#secondary-toolbar`).css({opacity: v});
+		}
+	};
+
+	d20plus.cfg.startPlayerConfigHandler = () => {
+		function handlePlayerCfg () {
+			d20plus.cfg.baseHandleConfigChange();
+			if (d20plus.handleConfigChange) d20plus.handleConfigChange(true);
+		}
+
+		// every 5 seconds, poll and apply any config changes the GM might have made
+		if (!window.is_gm) {
+			setInterval(() => {
+				handlePlayerCfg();
+			}, 5000);
+		}
+		handlePlayerCfg();
+	};
+}
+
+SCRIPT_EXTENSIONS.push(baseConfig);
+
+
+function baseTool() {
+	d20plus.tool = {};
+
+	d20plus.tool.tools = [
+		{
+			name: "Journal Cleaner",
+			desc: "Quickly select and delete journal items, especially useful for cleaning up loose items after deleting a folder.",
+			html: `
+				<div id="d20plus-quickdelete" title="Journal Root Cleaner">
+				<p>A list of characters and handouts in the journal folder root, which allows them to be quickly deleted.</p>
+				<label style="font-weight: bold">Root Only <input type="checkbox" class="cb-deep" checked></label>
+				<hr>
+				<p style="display: flex; justify-content: space-between"><label><input type="checkbox" title="Select all" id="deletelist-selectall"> Select All</label> <a class="btn" href="#" id="quickdelete-btn-submit">Delete Selected</a></p>
+				<div id="delete-list-container">
+					<input class="search" autocomplete="off" placeholder="Search list..." style="width: 100%;">
+					<br><br>
+					<ul class="list deletelist" style="max-height: 420px; overflow-y: scroll; display: block; margin: 0;"></ul>
+				</div>
+				</div>
+				`,
+			dialogFn: () => {
+				$("#d20plus-quickdelete").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 800,
+					height: 700,
+				});
+			},
+			openFn: () => {
+				const $win = $("#d20plus-quickdelete");
+				$win.dialog("open");
+				const $cbDeep = $win.find(`.cb-deep`);
+
+				const $cbAll = $("#deletelist-selectall").unbind("click");
+
+				const $btnDel = $(`#quickdelete-btn-submit`).off("click");
+
+				$cbDeep.off("change").on("change", () => populateList());
+
+				populateList();
+
+				function populateList () {
+					// collect a list of all journal items
+					function getAllJournalItems () {
+						const out = [];
+
+						function recurse (entry, pos, isRoot) {
+							if (entry.i) {
+								if (!isRoot) pos.push(entry.n);
+								entry.i.forEach(nxt => recurse(nxt, pos));
+								pos.pop();
+							} else out.push({id: entry, path: MiscUtil.copy(pos)});
+						}
+
+						const root = {i: d20plus.ut.getJournalFolderObj()};
+						recurse(root, [], true);
+						return out.map(it => getItemFromId(it.id, it.path.join(" / ")));
+					}
+
+					function getRootJournalItems () {
+						const rootItems = [];
+						const journal = d20plus.ut.getJournalFolderObj();
+						journal.forEach(it => {
+							if (it.i) return; // skip folders
+							rootItems.push(getItemFromId(it));
+						});
+						return rootItems;
+					}
+
+					function getItemFromId (itId, path = "") {
+						const handout = d20.Campaign.handouts.get(itId);
+						if (handout && (handout.get("name") === CONFIG_HANDOUT || handout.get("name") === ART_HANDOUT)) return null; // skip 5etools handouts
+						const character = d20.Campaign.characters.get(itId);
+						if (handout) return {type: "handouts", id: itId, name: handout.get("name"), path: path};
+						if (character) return {type: "characters", id: itId, name: character.get("name"), path: path};
+					}
+
+					function getJournalItems () {
+						if ($cbDeep.prop("checked")) return getRootJournalItems().filter(it => it);
+						else return getAllJournalItems().filter(it => it);
+					}
+
+					const journalItems = getJournalItems();
+
+					const $delList = $win.find(`.list`);
+					$delList.empty();
+
+					journalItems.forEach((it, i) => {
+						$delList.append(`
+							<label class="import-cb-label" data-listid="${i}">
+								<input type="checkbox">
+								<span class="name readable">${it.path ? `${it.path} / ` : ""}${it.name}</span>
+							</label>
+						`);
+					});
+
+					// init list library
+					const delList = new List("delete-list-container", {
+						valueNames: ["name"],
+						listClass: "deletelist"
+					});
+
+					$cbAll.prop("checked", false);
+					$cbAll.off("click").click(() => d20plus.importer._importToggleSelectAll(delList, $cbAll));
+
+					$btnDel.off("click").on("click", () => {
+						const sel = delList.items
+							.filter(it => $(it.elm).find(`input`).prop("checked"))
+							.map(it => journalItems[$(it.elm).attr("data-listid")]);
+
+						if (!sel.length) {
+							alert("No items selected!");
+						} else if (confirm(`Are you sure you want to delete the ${sel.length} selected item${sel.length > 1 ? "s" : ""}?`)) {
+							$win.dialog("close");
+							$("a.ui-tabs-anchor[href='#journal']").trigger("click");
+							sel.forEach(toDel => {
+								d20.Campaign[toDel.type].get(toDel.id).destroy();
+							});
+							$("#journalfolderroot").trigger("change");
+						}
+					});
+				}
+			}
+		},
+		{
+			name: "SVG Draw",
+			desc: "Paste SVG data as text to automatically draw the paths.",
+			html: `
+				<div id="d20plus-svgdraw" title="SVG Drawing Tool">
+				<p>Paste SVG data as text to automatically draw any included &lt;path&gt;s. Draws to the current layer, in the top-left corner, with no scaling. Takes colour information from &quot;stroke&quot; attributes.</p>
+				<p>Line width (px; default values are 1, 3, 5, 8, 14): <input name="stroke-width" placeholder="5" value="5" type="number"></p>
+				<textarea rows="10" cols="100" placeholder="Paste SVG data here"></textarea>
+				<br>
+				<button class="btn">Draw</button>
+				</div>
+				`,
+			dialogFn: () => {
+				$("#d20plus-svgdraw").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 800,
+					height: 650,
+				});
+			},
+			openFn: () => {
+				// adapted from `d20.engine.finishCurrentPolygon`
+				function addShape(path, pathStroke, strokeWidth) {
+					let i = d20.engine.convertAbsolutePathStringtoFabric(path);
+					i = _.extend(i, {
+						strokeWidth: strokeWidth,
+						fill: "transparent",
+						stroke: pathStroke,
+						path: JSON.parse(i.path)
+					});
+					d20.Campaign.activePage().addPath(i);
+					d20.engine.debounced_renderTop();
+				}
+
+				const $win = $("#d20plus-svgdraw");
+				$win.dialog("open");
+
+				$win.find(`button`).off("click").on("click", () => {
+					d20plus.ut.log("Drawing paths");
+					const input = $win.find(`textarea`).val();
+					const svg = $.parseXML(input);
+
+					const toDraw = $(svg).find("path").map((i, e) => {
+						const $e = $(e);
+						return {stroke: $e.attr("stroke") || "black", d: $e.attr("d")}
+					}).get();
+
+					const strokeWidth = Math.max(1, Number($win.find(`input[name="stroke-width"]`).val()));
+
+					toDraw.forEach(it => {
+						addShape(it.d, it.stroke, strokeWidth)
+					});
+				});
+			}
+		},
+		{
+			name: "Multi-Whisper",
+			desc: "Send whispers to multiple players ",
+			html: `
+				<div id="d20plus-whispers" title="Multi-Whisper Tool">
+				<div>
+					<button class="btn toggle-dc">Show Disconnected Players</button>
+					<button class="btn send-all">Send All Messages</button>
+					<button class="btn clear-all">Clear All Messages</button>
+				</div>
+				<hr>
+				<div class="messages" style="max-height: 600px; overflow-y: auto; overflow-x: hidden; transform: translateZ(0)">
+					<!-- populate with JS -->
+				</div>
+				</div>
+				`,
+			dialogFn: () => {
+				$("#d20plus-whispers").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 1000,
+					height: 760,
+				});
+			},
+			openFn: () => {
+				$("a.ui-tabs-anchor[href='#textchat']").trigger("click");
+
+				const $win = $("#d20plus-whispers");
+				$win.dialog("open");
+
+				const $btnToggleDc = $win.find(`.toggle-dc`).off("click").text("Show Disconnected Players");
+				const $btnSendAll = $win.find(`.send-all`).off("click");
+				const $btnClearAll = $win.find(`.clear-all`).off("click");
+
+				const $pnlMessages = $win.find(`.messages`).empty();
+				const players = d20.Campaign.players.toJSON();
+				players.forEach((p, i) => {
+					const $btnSend = $(`<button class="btn send" style="margin-right: 5px;">Send</button>`).on("click", function () {
+						const $btn = $(this);
+						const $wrp = $btn.closest(`.wrp-message`);
+						const toMsg = $wrp.find(`input[data-player-id]:checked`).filter(":visible").map((ii, e) => $(e).attr("data-player-id")).get();
+						const content = $wrp.find(`.message`).val().trim();
+						toMsg.forEach(targetId => {
+							d20.textchat.doChatInput(`/w ${d20.Campaign.players.get(targetId).get("displayname").split(" ")[0]} ${content}`);
+
+							// This only posts to local player's chat, sadly
+							// d20.textchat.incoming(
+							// 	false,
+							// 	{
+							// 		avatar: `/users/avatar/${window.currentPlayer.get("d20userid")}/30`,
+							// 		who: d20.textchat.$speakingas.find("option:first-child").text(),
+							// 		type: "whisper",
+							// 		content: content,
+							// 		playerid: window.currentPlayer.id,
+							// 		id: d20plus.ut.generateRowId(),
+							// 		target: targetId,
+							// 		target_name: d20.Campaign.players.get(targetId).get("displayname") || ""
+							// 	}
+							// );
+						})
+					});
+
+					const $btnClear =  $(`<button class="btn msg-clear">Clear</button>`).on("click", function () {
+						$(this).closest(`.wrp-message`).find(`.message`).val("");
+					});
+
+					$pnlMessages.append($(`
+							<div ${p.online || `style="display: none;"`} data-online="${p.online}" class="wrp-message">
+								<div>
+									${players.map((pp, ii) => `<label style="margin-right: 10px; ${pp.online || ` display: none;`}" data-online="${pp.online}" class="display-inline-block">${pp.displayname} <input data-player-id="${pp.id}" type="checkbox" ${i === ii ? `checked="true"` : ""}></label>`).join("")}
+								</div>
+								<textarea style="display: block; width: 95%;" placeholder="Enter whisper" class="message"></textarea>
+							</div>						
+						`).append($btnSend).append($btnClear).append(`<hr>`));
+				});
+
+				$btnToggleDc.on("click", () => {
+					$btnToggleDc.text($btnToggleDc.text().startsWith("Show") ? "Hide Disconnected Players" : "Show Disconnected Players");
+					$pnlMessages.find(`[data-online="false"]`).toggle();
+				});
+
+				$btnSendAll.on("click", () => {
+					$pnlMessages.find(`button.send`).click();
+				});
+
+				$btnClearAll.on("click", () => $pnlMessages.find(`button.msg-clear`).click());
+			}
+		},
+		{
+			name: "Table Importer",
+			desc: "Import TableExport data",
+			html: `
+				<div id="d20plus-tables" title="Table Importer">
+					<div>
+					<button class="btn paste-clipboard">Paste from Clipboard</button> <i>Accepts <a href="https://app.roll20.net/forum/post/1144568/script-tableexport-a-script-for-exporting-and-importing-rollable-tables-between-accounts">TableExport</a> format.</i>
+					</div>
+					<br>
+					<div id="table-list">
+						<input type="search" class="search" placeholder="Search tables...">
+						<div class="list" style="transform: translateZ(0); max-height: 490px; overflow-y: scroll; overflow-x: hidden;"><i>Loading...</i></div>
+					</div>
+				<br>
+				<button class="btn start-import">Import</button>
+				</div>
+				
+				<div id="d20plus-tables-clipboard" title="Paste from Clipboard"/>
+				`,
+			dialogFn: () => {
+				$("#d20plus-tables").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 650,
+					height: 720,
+				});
+				$(`#d20plus-tables-clipboard`).dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 640,
+					height: 480,
+				});
+			},
+			openFn: () => {
+				const $win = $("#d20plus-tables");
+				$win.dialog("open");
+
+				const $btnImport = $win.find(`.start-import`).off("click");
+				const $btnClipboard = $win.find(`.paste-clipboard`).off("click");
+
+				const url = `${BASE_SITE_URL}/data/roll20-tables.json`;
+				DataUtil.loadJSON(url).then((data) => {
+					function createTable (t) {
+						const r20t = d20.Campaign.rollabletables.create({
+							name: t.name.replace(/\s+/g, "-"),
+							showplayers: t.isShown,
+							id: d20plus.ut.generateRowId()
+						});
+
+						r20t.tableitems.reset(t.items.map(i => {
+							const out = {
+								id: d20plus.ut.generateRowId(),
+								name: i.row
+							};
+							if (i.weight !== undefined) out.weight = i.weight;
+							if (i.avatar) out.avatar = i.avatar;
+							return out;
+						}));
+						r20t.tableitems.forEach(it => it.save());
+					}
+
+					// Allow pasting of custom tables
+					$btnClipboard.on("click", () => {
+						const $wrpClip = $(`#d20plus-tables-clipboard`);
+						const $iptClip = $(`<textarea placeholder="Paste TableExport data here" style="display: block; width: 600px; height: 340px;"/>`).appendTo($wrpClip);
+						const $btnCheck = $(`<button class="btn" style="margin-right: 5px;">Check if Valid</button>`).on("click", () => {
+							let error = false;
+							try {
+								getFromPaste($iptClip.val());
+							} catch (e) {
+								console.error(e);
+								window.alert(e.message);
+								error = true;
+							}
+							if (!error) window.alert("Looking good!");
+						}).appendTo($wrpClip);
+						const $btnImport = $(`<button class="btn">Import</button>`).on("click", () => {
+							$("a.ui-tabs-anchor[href='#deckstables']").trigger("click");
+							const ts = getFromPaste($iptClip.val());
+							ts.forEach(t => createTable(t));
+							window.alert("Import complete");
+						}).appendTo($wrpClip);
+
+						$wrpClip.dialog("open");
+					});
+
+					function getFromPaste (paste) {
+						const tables = [];
+						let tbl = null;
+
+						paste.split("\n").forEach(line => parseLine(line.trim()));
+						parseLine(""); // ensure trailing newline
+						return tables;
+
+						function parseLine (line) {
+							if (line.startsWith("!import-table-item")) {
+								if (!tbl) {
+									throw new Error("No !import-table statement found");
+								}
+								const [junk, tblName, row, weight, avatar] = line.split("--").map(it => it.trim());
+								tbl.items.push({
+									row,
+									weight,
+									avatar
+								})
+							} else if (line.startsWith("!import-table")) {
+								if (tbl) {
+									throw new Error("No blank line found between tables")
+								}
+								const [junk, tblName,showHide] = line.split("--").map(it => it.trim());
+								tbl = {
+									name: tblName,
+									isShown: showHide.toLowerCase() === "show"
+								};
+								tbl.items = [];
+							} else if (line.trim()) {
+								throw new Error("Non-empty line which didn't match !import-table or !import-table-item")
+							} else {
+								if (tbl) {
+									tables.push(tbl);
+									tbl = null;
+								}
+							}
+						}
+					}
+
+					// Official tables
+					const $lst = $win.find(`.list`);
+					const tables = data.table.sort((a, b) => SortUtil.ascSort(a.name, b.name));
+					let tmp = "";
+					tables.forEach((t, i) => {
+						tmp += `
+								<label class="import-cb-label" data-listid="${i}">
+									<input type="checkbox">
+									<span class="name col-10">${t.name}</span>
+									<span title="${t.source ? Parser.sourceJsonToFull(t.source) : "Unknown Source"}" class="source">SRC[${t.source ? Parser.sourceJsonToAbv(t.source) : "UNK"}]</span>
+								</label>
+							`;
+					});
+					$lst.html(tmp);
+					tmp = null;
+
+					const tableList = new List("table-list", {
+						valueNames: ["name", "source"]
+					});
+
+					$btnImport.on("click", () => {
+						$("a.ui-tabs-anchor[href='#deckstables']").trigger("click");
+						const sel = tableList.items
+							.filter(it => $(it.elm).find(`input`).prop("checked"))
+							.map(it => tables[$(it.elm).attr("data-listid")]);
+
+						sel.forEach(t => createTable(t));
+					});
+				});
+			}
+		},
+		{
+			name: "Token Avatar URL Fixer",
+			desc: "Change the root URL for tokens en-masse.",
+			html: `
+				<div id="d20plus-avatar-fixer" title="Avatar Fixer">
+				<p><b>Warning:</b> this thing doesn't really work.</p>
+				<p>Current URLs (view only): <select class="view-only"></select></p>
+				<p><label>Replace:<br><input name="search" value="https://5etools.com/"></label></p>
+				<p><label>With:<br><input name="replace" value="https://thegiddylimit.github.io/"></label></p>
+				<p><button class="btn">Go!</button></p>
+				</div>
+				`,
+			dialogFn: () => {
+				$("#d20plus-avatar-fixer").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 400,
+					height: 400,
+				});
+			},
+			openFn: () => {
+				// FIXME this doesn't work, because it saves a nonsensical blob (imgsrc) instead of defaulttoken
+				// see the working code in `initArtFromUrlButtons` for how this _should_ be done
+
+				function replaceAll (str, search, replacement) {
+					return str.split(search).join(replacement);
+				}
+
+				const $win = $("#d20plus-avatar-fixer");
+				$win.dialog("open");
+
+				const $selView = $win.find(`.view-only`);
+				const toView = [];
+				d20.Campaign.characters.toJSON().forEach(c => {
+					if (c.avatar && c.avatar.trim()) {
+						toView.push(c.avatar);
+					}
+				});
+				toView.sort(SortUtil.ascSort).forEach(url => $selView.append(`<option disabled>${url}</option>`));
+
+				const $btnGo = $win.find(`button`).off("click");
+				$btnGo.on("click", () => {
+					let count = 0;
+					$("a.ui-tabs-anchor[href='#journal']").trigger("click");
+
+					const search = $win.find(`[name="search"]`).val();
+					const replace = $win.find(`[name="replace"]`).val();
+
+					d20.Campaign.characters.toJSON().forEach(c => {
+						const id = c.id;
+
+						const realC = d20.Campaign.characters.get(id);
+
+						const curr = realC.get("avatar");
+						let toSave = false;
+						if (curr.includes(search)) {
+							count++;
+							realC.set("avatar", replaceAll(curr, search, replace));
+							toSave = true;
+						}
+						if (realC.get("defaulttoken")) {
+							realC._getLatestBlob("defaulttoken", (bl) => {
+								if (bl && bl.imgsrc && bl.imgsrc.includes(search)) {
+									count++;
+									realC.updateBlobs({imgsrc: replaceAll(bl.imgsrc, search, replace)});
+									toSave = true;
+								}
+							});
+						}
+						if (toSave) {
+							realC.save();
+						}
+					});
+					window.alert(`Replaced ${count} item${count === 0 || count > 1 ? "s" : ""}.`)
+				});
+			}
+		},
+		{
+			name: "Mass-Delete Pages",
+			desc: "Quickly delete multiple pages.",
+			html: `
+				<div id="d20plus-mass-page-delete" title="Mass-Delete Pages">
+					<div id="del-pages-list">
+						<div class="list" style="transform: translateZ(0); max-height: 490px; overflow-y: scroll; overflow-x: hidden; margin-bottom: 10px;"><i>Loading...</i></div>
+					</div>
+					<hr>
+					<p><label class="ib"><input type="checkbox" class="select-all"> Select All</label> | <button class="btn btn-danger deleter">Delete</button></p>
+					<p><i>This tool will delete neither your active page, nor a page active for players.</i></p>
+				</div>
+				`,
+			dialogFn: () => {
+				$("#d20plus-mass-page-delete").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 600,
+					height: 800,
+				});
+			},
+			openFn: () => {
+				function deletePage (model, pageList) {
+					if ($("#page-toolbar .availablepage[data-pageid=" + model.id + "]").remove()) {
+						var n = d20.Campaign.getPageIndex(model.id);
+						model.thegraphics.massdelete = true;
+						model.thetexts.massdelete = true;
+						model.thepaths.massdelete = true;
+						model.thegraphics.backboneFirebase.reference.set(null);
+						model.thetexts.backboneFirebase.reference.set(null);
+						model.thepaths.backboneFirebase.reference.set(null);
+						let i = d20.Campaign.get("playerspecificpages");
+						let o = false;
+						_.each(i, function(e, n) {
+							if (e === model.id) {
+								delete i[n];
+								o = true;
+							}
+						});
+						o && d20.Campaign.save({
+							playerspecificpages: i
+						});
+						model.destroy();
+						d20.Campaign.activePageIndex > n && (d20.Campaign.activePageIndex -= 1);
+
+						pageList.remove("page-id", model.id);
+					}
+				}
+
+				const $win = $("#d20plus-mass-page-delete");
+				$win.dialog("open");
+
+				const $lst = $win.find(`.list`).empty();
+
+				d20.Campaign.pages.models.forEach(m => {
+					$lst.append(`
+							<label class="import-cb-label import-cb-label--img" data-listid="${m.id}">
+								<input type="checkbox">
+								<img class="import-label__img" src="${m.attributes.thumbnail}">
+								<span class="name col-9">${m.attributes.name}</span>
+								<span style="display: none;" class="page-id">${m.id}</span>
+							</label>
+						`);
+				});
+
+				const pageList = new List("del-pages-list", {
+					valueNames: ["name", "page-id"]
+				});
+
+				const $cbAll = $win.find(`.select-all`).off("click").click(() => {
+					pageList.items.forEach(it => {
+						$(it.elm).find(`input[type="checkbox"]`).prop("checked", $cbAll.prop("checked"));
+					});
+				});
+
+				const $btnDel = $win.find(`.deleter`).off("click").click(() => {
+					const sel = pageList.items
+						.filter(it => $(it.elm).find(`input`).prop("checked"))
+						.map(it => $(it.elm).attr("data-listid"))
+						.map(pId => d20.Campaign.pages.models.find(it => it.id === pId))
+						.filter(it => it);
+
+					sel.forEach(m => {
+						if (m.id !== d20.Campaign.get("playerpageid") && m.id !== d20.Campaign.activePage().id) {
+							deletePage(m, pageList);
+						}
+					});
+					$cbAll.prop("checked", false);
+				});
+			}
+		},
+		{
+			name: "Quantum Token Entangler",
+			desc: "Connect tokens between pages, linking their positions.",
+			html: `
+				<div id="d20plus-token-entangle" title="Quantum Token Entangler">
+					<p><i>Please note that this feature is highly experimental.
+					<br>
+					You can learn Token IDs by rightclicking a token -> "Advanced" -> "View Token ID."</i></p>
+					<hr>
+					<input id="token-entangle-id-1" placeholder="Master Token ID">
+					<input id="token-entangle-id-2" placeholder="Slave Token ID">
+					<br>
+					<button class="btn btn-default" id="token-entangle-go">Entangle</button>
+					<hr>
+					<input id="token-clear-entangles" placeholder="Token ID to Clear">
+					<button class="btn btn-default" id="token-entangle-clear">Clear Entangles</button>
+				</div>
+				`,
+			dialogFn: () => {
+				const $win = $("#d20plus-token-entangle");
+
+				const entangleTracker = {};
+				const SYNCABLE_ATTRS = [
+					"rotation",
+					"width",
+					"height",
+					"top",
+					"left",
+					"scaleX",
+					"scaleY",
+					"fliph",
+					"flipv"
+				];
+
+				$win.data("VE_DO_ENTANGLE", (master) => {
+					// prevent double-binding
+					if (entangleTracker[master.id]) return;
+
+					master.on("change", (it) => {
+						if (master.attributes.entangled && master.attributes.entangled.length) {
+							if (SYNCABLE_ATTRS.filter(attr => it.changed !== undefined).length) {
+								let anyUpdates = false;
+
+								master.attributes.entangled = master.attributes.entangled.filter(id => {
+									const slave = d20plus.ut.getTokenFromId(id);
+									if (slave) {
+										SYNCABLE_ATTRS.forEach(attr => slave.attributes[attr] = master.attributes[attr]);
+										slave.save();
+										return true;
+									} else {
+										console.warn(`Cound not find entangled token with ID "${id}", removing...`);
+										anyUpdates = true;
+									}
+								});
+
+								if (anyUpdates) master.save();
+							}
+						}
+					})
+				});
+
+				// do initial entangles
+				const runInitial = () => {
+					const pages = d20.Campaign.pages;
+					if (pages && pages.models) {
+						console.log("Initial existing entangles...");
+						d20.Campaign.pages.models
+							.filter(model => model.thegraphics && model.thegraphics.models)
+							.forEach(model => model.thegraphics.models.filter(it => it.attributes.entangled && it.attributes.entangled.length)
+							.forEach(it => {
+								$win.data("VE_DO_ENTANGLE")(it);
+							}));
+					} else {
+						console.log("Pages uninitialised, waiting...");
+						setTimeout(runInitial, 1000);
+					}
+				};
+
+				runInitial();
+
+				$win.dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 300,
+					height: 400,
+				});
+			},
+			openFn: () => {
+				const notFound = (id) => alert(`Token with ID ${id} didn't exist!`);
+
+				const $win = $("#d20plus-token-entangle");
+				$win.dialog("open");
+
+				const $ipt1 = $(`#token-entangle-id-1`);
+				const $ipt2 = $(`#token-entangle-id-2`);
+
+				const $btnGo = $(`#token-entangle-go`)
+					.off("click")
+					.click(() => {
+						const tkId1 = $ipt1.val();
+						const tkId2 = $ipt2.val();
+						const checkExisting = (a, b) => {
+							if (a.attributes.entangled && a.attributes.entangled.includes(b.id)) return `"${a.id}" is already entangled to "${b.id}"!`;
+							else if (b.attributes.entangled && b.attributes.entangled.includes(a.id)) return `"${b.id}" is already entangled to "${a.id}"!`;
+							else return false;
+						};
+
+						const token1 = d20plus.ut.getTokenFromId(tkId1);
+						const token2 = d20plus.ut.getTokenFromId(tkId2);
+
+						if (!token1) return notFound(tkId1);
+						if (!token2) return notFound(tkId2);
+
+						const existing = checkExisting(token1, token2);
+						if (existing) return alert(existing);
+
+						(token1.attributes.entangled = token1.attributes.entangled || []).push(tkId2);
+						token1.save();
+						(token2.attributes.entangled = token2.attributes.entangled || []).push(tkId1);
+						token2.save();
+
+						$win.data("VE_DO_ENTANGLE")(token1);
+						$win.data("VE_DO_ENTANGLE")(token2);
+						alert("Tokens entangled!");
+					});
+
+				const $iptClear = $(`#token-clear-entangles`);
+
+				const $btnClear = $(`#token-entangle-clear`)
+					.off("click")
+					.click(() => {
+						const tkId = $iptClear.val();
+						const token = d20plus.ut.getTokenFromId(tkId);
+						if (!token) return notFound(tkId);
+
+						const count = token.attributes.entangled ? token.attributes.entangled.length : 0;
+						(token.attributes.entangled || []).forEach(eId => {
+							const ent = d20plus.ut.getTokenFromId(eId);
+							if (ent && ent.attributes.entangled && ent.attributes.entangled.includes(tkId)) {
+								ent.attributes.entangled.splice(ent.attributes.entangled.indexOf(tkId), 1);
+								ent.save();
+							}
+						});
+						token.attributes.entangled = [];
+						token.save();
+						alert(`${count} entangle${count === 1 ? "" : "s"} cleared.`);
+					});
+			}
+		},
+		{
+			toolId: "MODULES",
+			name: "Module Importer/Exporter",
+			desc: "Import Full Games (Modules), or Import/Export Custom Games",
+			html: `
+				<div id="d20plus-module-importer" title="Module Importer/Exporter">
+				<p style="margin-bottom: 4px;"><b style="font-size: 110%;">Exporter: </b> <button class="btn" name="export">Export Game to File</button> <i>The exported file can later be used with the "Upload File" option, below.</i></p>
+				<hr style="margin: 4px;">
+				<p style="margin-bottom: 4px;">
+					<b style="font-size: 110%;">Importer:</b>
+					<button class="btn readme" style="float: right;">Help/README</button>
+					<div style="clear: both;"></div>
+				</p>
+				<div style="border-bottom: 1px solid #ccc; margin-bottom: 3px; padding-bottom: 3px;">
+					<button class="btn" name="load-Vetools">Load from 5etools</button>
+					<button class="btn" name="load-file">Upload File</button>
+				</div>
+				<div>
+					<div name="data-loading-message"></div>
+					<select name="data-type" disabled style="margin-bottom: 0;">
+						<option value="characters">Characters</option>
+						<option value="decks">Decks</option>
+						<option value="handouts">Handouts</option>
+						<option value="maps">Maps</option>
+						<option value="rolltables">Rollable Tables</option>
+					</select>
+					<button class="btn" name="view-select-entrues">View/Select Entries</button>
+					<div name="selection-summary" style="margin-top: 5px;"></div>
+				</div>
+				<hr>
+				<p><button class="btn" style="float: right;" name="import">Import Selected</button></p>
+				</div>
+				
+				<div id="d20plus-module-importer-list" title="Select Entries">					
+					<div id="module-importer-list">
+						<input type="search" class="search" placeholder="Search..." disabled>
+						<div class="list" style="transform: translateZ(0); max-height: 650px; overflow-y: auto; overflow-x: hidden; margin-bottom: 10px;">
+						<i>Load a file to view the contents here</i>
+						</div>
+					</div>
+					<div>
+						<label class="ib"><input type="checkbox" class="select-all"> Select All</label>
+						<button class="btn" style="float: right;" name="confirm-selection">Confirm Selection</button>
+					</div>
+				</div>
+				
+				<div id="d20plus-module-importer-progress" title="Import Progress">					
+					<h3 class="name"></h3>
+					<span class="remaining"></span> 
+					<p>Errors: <span class="errors">0</span> <span class="error-names"></span></p>
+					<p><button class="btn cancel">Cancel</button></p>
+				</div>
+				
+				<div id="d20plus-module-importer-help" title="Readme">
+					<p>First, either load a module from 5etools, or upload one from a file. Then, choose the category you wish to import, and "View/Select Entries." Once you've selected everything you wish to import from the module, hit "Import Selected." This ensures entries are imported in the correct order.</p>
+					<p><b>Note:</b> The script-wide configurable "rest time" options affect how quickly each category of entries is imported (tables and decks use the "Handout" rest time).</p>
+					<p><b>Note:</b> Configuration options (aside from "rest time" as detailed above) <i>do not</i> affect the module importer. It effectively "clones" the content as-exported from the original module, including any whisper/advantage/etc settings.</p>
+				</div>
+				
+				<div id="d20plus-module-importer-5etools" title="Select Module">
+					<div id="module-importer-list-5etools">
+						<input type="search" class="search" placeholder="Search modules...">
+						<div class="list" style="transform: translateZ(0); max-height: 480px; overflow-y: auto; overflow-x: hidden; margin-bottom: 10px;">
+						<i>Loading...</i>
+						</div>
+					</div>
+					<p><button class="btn load">Load Module Data</button></p>
+				</div>
+				
+				<div id="d20plus-module-importer-select-exports-p1" title="Select Categories to Export">
+					<div>
+						<label>Characters <input type="checkbox" class="float-right" name="cb-characters"></label>
+						<label>Decks <input type="checkbox" class="float-right" name="cb-decks"></label>
+						<label>Handouts <input type="checkbox" class="float-right" name="cb-handouts"></label>
+						<label>Maps <input type="checkbox" class="float-right" name="cb-maps"></label>
+						<label>Rollable Tables <input type="checkbox" class="float-right" name="cb-rolltables"></label>
+					</div>
+					<div class="clear" style="width: 100%; border-bottom: #ccc solid 1px;"></div>
+					<p style="margin-top: 5px;"><label>Select All <input type="checkbox" class="float-right" name="cb-all"></label></p>
+					<p><button class="btn">Export</button></p>
+				</div>
+				`,
+			dialogFn: () => {
+				$("#d20plus-module-importer").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 750,
+					height: 360,
+				});
+				$(`#d20plus-module-importer-progress`).dialog({
+					autoOpen: false,
+					resizable: false
+				});
+				$("#d20plus-module-importer-5etools").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 800,
+					height: 600,
+				});
+				$("#d20plus-module-importer-help").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 600,
+					height: 400,
+				});
+				$("#d20plus-module-importer-select-exports-p1").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 400,
+					height: 260,
+				});
+				$("#d20plus-module-importer-list").dialog({
+					autoOpen: false,
+					resizable: true,
+					width: 600,
+					height: 800,
+				});
+			},
+			openFn: () => {
+				const DISPLAY_NAMES = {
+					maps: "Maps",
+					rolltables: "Rollable Tables",
+					decks: "Decks",
+					handouts: "Handouts",
+					characters: "Characters",
+				}
+
+				const $win = $("#d20plus-module-importer");
+				$win.dialog("open");
+
+				const $winProgress = $(`#d20plus-module-importer-progress`);
+				const $btnCancel = $winProgress.find(".cancel").off("click");
+
+				const $win5etools = $(`#d20plus-module-importer-5etools`);
+
+				const $winHelp = $(`#d20plus-module-importer-help`);
+				const $btnHelp = $win.find(`.readme`).off("click").click(() => $winHelp.dialog("open"));
+
+				const $winList = $(`#d20plus-module-importer-list`);
+				const $wrpLst = $(`#module-importer-list`);
+				const $lst = $winList.find(`.list`).empty();
+				const $cbAll = $winList.find(`.select-all`).off("click").prop("disabled", true);
+				const $iptSearch = $winList.find(`.search`).prop("disabled", true);
+				const $btnConfirmSel = $winList.find(`[name="confirm-selection"]`).off("click");
+
+				const $wrpSummary = $win.find(`[name="selection-summary"]`);
+				const $wrpDataLoadingMessage = $win.find(`[name="data-loading-message"]`);
+
+				const $btnImport = $win.find(`[name="import"]`).off("click").prop("disabled", true);
+				const $btnViewCat = $win.find(`[name="view-select-entrues"]`).off("click").prop("disabled", true);
+
+				const $selDataType = $win.find(`[name="data-type"]`).prop("disabled", true);
+				let lastDataType = $selDataType.val();
+				let genericFolder;
+				let lastLoadedData = null;
+
+				const getFreshSelected = () => ({
+					characters: [],
+					decks: [],
+					handouts: [],
+					maps: [],
+					rolltables: []
+				})
+
+				let selected = getFreshSelected();
+
+				function handleLoadedData (data) {
+					lastLoadedData = data;
+					selected = getFreshSelected();
+					$selDataType.prop("disabled", false);
+
+					$btnViewCat.prop("disabled", false);
+					$btnViewCat.off("click").click(() => {
+						$winList.dialog("open");
+						$iptSearch.prop("disabled", false);
+
+						let prop = "";
+						switch (lastDataType) {
+							case "maps": {
+								prop = "maps";
+								break;
+							}
+							case "rolltables": {
+								prop = "rolltables";
+								break;
+							}
+							case "decks": {
+								prop = "decks";
+								break;
+							}
+							case "handouts": {
+								prop = "handouts";
+								genericFolder = d20plus.importer.makeDirTree(`Handouts`);
+								break;
+							}
+							case "characters": {
+								prop = "characters";
+								genericFolder = d20plus.importer.makeDirTree(`Characters`);
+								break;
+							}
+							default: throw new Error(`Unhandled data type: ${lastDataType}`);
+						}
+
+						const moduleData = data[prop];
+						data[prop].sort((a, b) => SortUtil.ascSortLower(a.attributes.name || "", b.attributes.name || ""));
+
+						$lst.empty();
+						moduleData.forEach((m, i) => {
+							const img = lastDataType === "maps" ? m.attributes.thumbnail :
+								(lastDataType === "characters" || lastDataType === "handouts" || lastDataType === "decks") ? m.attributes.avatar : "";
+
+							$lst.append(`
+									<label class="import-cb-label ${img ? `import-cb-label--img` : ""}" data-listid="${i}">
+										<input type="checkbox">
+										${img && img.trim() ? `<img class="import-label__img" src="${img}">` : ""}
+										<span class="name col-9 readable">${m.attributes.name}</span>
+									</label>
+								`);
+						});
+
+						const entryList = new List("module-importer-list", {
+							valueNames: ["name"]
+						});
+
+						$cbAll.prop("disabled", false).off("click").click(() => {
+							entryList.items.forEach(it => {
+								$(it.elm).find(`input[type="checkbox"]`).prop("checked", $cbAll.prop("checked"));
+							});
+						});
+
+						$btnConfirmSel.off("click").click(() => {
+							const sel = entryList.items
+								.filter(it => $(it.elm).find(`input`).prop("checked"))
+								.map(it => moduleData[$(it.elm).attr("data-listid")]);
+
+							if (!sel.length) return alert("No entries selected!");
+
+							$cbAll.prop("checked", false);
+							$winList.dialog("close");
+							selected[prop] = sel;
+							$wrpSummary.text(Object.entries(selected).filter(([prop, ents]) => ents.length).map(([prop, ents]) => `${DISPLAY_NAMES[prop]}: ${ents.length} selected`).join("; "));
+						});
+					});
+
+					$btnImport.prop("disabled", false).off("click").click(() => {
+						const totalSelected = Object.values(selected).map(it => it.length).reduce((a, b) => a + b, 0);
+						if (!totalSelected) return alert("No entries selected!");
+
+						const $name = $winProgress.find(`.name`);
+						const $remain = $winProgress.find(`.remaining`).text(`${totalSelected} remaining...`);
+						const $errCount = $winProgress.find(`.errors`);
+						const $errReasons = $winProgress.find(`.error-names`);
+						let errCount = 0;
+
+						$winProgress.dialog("open");
+
+						const journal = data.journal ? MiscUtil.copy(data.journal).reverse() : null;
+
+						let queue = [];
+						Object.entries(selected).filter(([k, v]) => v.length).forEach(([prop, ents]) => {
+							ents = MiscUtil.copy(ents);
+
+							// if importing journal items, make sure they get put back in the right order
+							if (journal && (prop === "characters" || prop === "handouts")) {
+								const nuQueue = [];
+
+								journal.forEach(jIt => {
+									const qIx = ents.findIndex(qIt => qIt.attributes.id === jIt.id);
+									if (~qIx) nuQueue.push(ents.splice(qIx, 1)[0]);
+								});
+								ents.forEach(qIt => nuQueue.push(qIt)); // add anything that wasn't in the journal to the end of the queue
+								ents = nuQueue;
+							}
+
+							const toAdd = ents.map(entry => ({entry, prop}));
+							// do maps first
+							if (prop === "maps") queue = toAdd.concat(queue);
+							else queue = queue.concat(toAdd);
+						});
+
+						selected = getFreshSelected();
+						$wrpSummary.text("");
+
+						let isCancelled = false;
+						let lastTimeout = null;
+						$btnCancel.off("click").click(() => {
+							isCancelled = true;
+							if (lastTimeout != null) {
+								clearTimeout(lastTimeout);
+								doImport();
+							}
+						});
+						const mapTimeout = d20plus.cfg.getCfgVal("import", "importIntervalMap") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalMap");
+						const charTimeout = d20plus.cfg.getCfgVal("import", "importIntervalCharacter") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalCharacter");
+						const handoutTimeout = d20plus.cfg.getCfgVal("import", "importIntervalHandout") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalHandout");
+						const timeouts = {
+							characters: charTimeout,
+							decks: handoutTimeout,
+							handouts: handoutTimeout,
+							maps: mapTimeout,
+							rolltables: handoutTimeout
+						}
+
+						const addToJournal = (originalId, itId) => {
+							let handled = false;
+							if (journal) {
+								const found = journal.find(it => it.id === originalId);
+								if (found) {
+									const rawPath = found.path;
+									const cleanPath = rawPath.slice(1); // paths start with "Root"
+									const folder = d20plus.importer.makeDirTree(...cleanPath);
+									d20.journal.addItemToFolderStructure(itId, folder.id);
+									handled = true;
+								}
+							}
+
+							if (!handled) d20.journal.addItemToFolderStructure(itId, genericFolder.id);
+						};
+
+						const doImport = () => {
+							if (isCancelled) {
+								$name.text("Import cancelled.");
+								$remain.text(`Cancelled with ${queue.length} remaining.`);
+							} else if (queue.length && !isCancelled) {
+								$remain.text(`${queue.length} remaining...`);
+								const {entry, prop} = queue.shift();
+								const timeout = timeouts[prop];
+								const name = entry.attributes.name;
+								try {
+									$name.text(`Importing ${name}`);
+
+									switch (prop) {
+										case "maps": {
+											const map = d20.Campaign.pages.create(entry.attributes);
+											entry.graphics.forEach(it => map.thegraphics.create(it));
+											entry.paths.forEach(it => map.thepaths.create(it));
+											entry.text.forEach(it => map.thetexts.create(it));
+											map.save();
+											break;
+										}
+										case "rolltables": {
+											const table = d20.Campaign.rollabletables.create(entry.attributes);
+											table.tableitems.reset();
+											const toSave = entry.tableitems.map(it => table.tableitems.push(it));
+											toSave.forEach(s => s.save());
+											table.save();
+											break;
+										}
+										case "decks": {
+											const deck = d20.Campaign.decks.create(entry.attributes);
+											deck.cards.reset();
+											const toSave = entry.cards.map(it => deck.cards.push(it));
+											toSave.forEach(s => s.save());
+											deck.save();
+											break;
+										}
+										case "handouts": {
+											d20.Campaign.handouts.create(entry.attributes,
+												{
+													success: function (handout) {
+														handout.updateBlobs({
+															notes: entry.blobNotes,
+															gmnotes: entry.blobGmNotes
+														});
+
+														addToJournal(entry.attributes.id, handout.id);
+													}
+												}
+											);
+											break;
+										}
+										case "characters": {
+											d20.Campaign.characters.create(entry.attributes,
+												{
+													success: function (character) {
+														character.attribs.reset();
+														const toSave = entry.attribs.map(a => character.attribs.push(a));
+														toSave.forEach(s => s.syncedSave());
+
+														character.abilities.reset();
+														if (entry.abilities) entry.abilities.map(a => character.abilities.push(a)).forEach(s => s.save());
+
+														character.updateBlobs({
+															bio: entry.blobBio,
+															gmnotes: entry.blobGmNotes,
+															defaulttoken: entry.blobDefaultToken
+														});
+
+														addToJournal(entry.attributes.id, character.id);
+													}
+												}
+											);
+											break;
+										}
+										default: throw new Error(`Unhandled data type: ${prop}`);
+									}
+								} catch (e) {
+									console.error(e);
+
+									errCount++;
+									$errCount.text(errCount);
+									const prevReasons = $errReasons.text().trim();
+									$errReasons.append(`${prevReasons.length ? ", " : ""}${name}: "${e.message}"`)
+								}
+
+								// queue up the next import
+								lastTimeout = setTimeout(doImport, timeout);
+							} else {
+								$name.text("Import complete!");
+								$remain.text(`${queue.length} remaining.`);
+							}
+						};
+
+						doImport();
+					});
+				}
+
+				$selDataType.off("change").on("change", () => {
+					lastDataType = $selDataType.val();
+				});
+
+				const $btnLoadVetools = $win.find(`[name="load-Vetools"]`);
+				$btnLoadVetools.off("click").click(() => {
+					$win5etools.dialog("open");
+					const $btnLoad = $win5etools.find(`.load`).off("click");
+
+					DataUtil.loadJSON(`${DATA_URL}roll20-module/roll20-module-index.json`).then(data => {
+						const $lst = $win5etools.find(`.list`);
+						const modules = data.map.sort((a, b) => SortUtil.ascSortLower(a.name, b.name));
+						let tmp = "";
+						modules.forEach((t, i) => {
+							tmp += `
+								<label class="import-cb-label" data-listid="${i}">
+									<input type="radio" name="map-5etools">
+									<span class="name col-7 readable">${t.name}</span>
+									<span class="name col-3 readable" style="text-align: right;">${d20plus.ut.getReadableFileSizeString(t.size)}</span>
+									<span title="${Parser.sourceJsonToFull(t.id)}" class="source readable" style="text-align: right;">SRC[${Parser.sourceJsonToAbv(t.id)}]</span>
+								</label>
+							`;
+						});
+						$lst.html(tmp);
+						tmp = null;
+
+						const list5etools = new List("module-importer-list-5etools", {
+							valueNames: ["name"]
+						});
+
+						$btnLoad.on("click", () => {
+							const sel = list5etools.items
+								.filter(it => $(it.elm).find(`input`).prop("checked"))
+								.map(it => modules[$(it.elm).attr("data-listid")])[0];
+
+							$win5etools.dialog("close");
+							$win.dialog("open");
+							$wrpDataLoadingMessage.html("<i>Loading...</i>");
+							DataUtil.loadJSON(`${DATA_URL}roll20-module/roll20-module-${sel.id.toLowerCase()}.json`)
+								.then(moduleFile => {
+									$wrpDataLoadingMessage.html("");
+									return handleLoadedData(moduleFile);
+								})
+								.catch(e => {
+									$wrpDataLoadingMessage.html("");
+									console.error(e);
+									alert(`Failed to load data! See the console for more information.`);
+								});
+						});
+					}).catch(e => {
+						console.error(e);
+						alert(`Failed to load data! See the console for more information.`);
+					});
+				});
+
+				const $btnLoadFile = $win.find(`[name="load-file"]`);
+				$btnLoadFile.off("click").click(() => {
+					DataUtil.userUpload((data) => handleLoadedData(data));
+				});
+
+				const $winExportP1 = $("#d20plus-module-importer-select-exports-p1");
+				const $cbAllExport = $winExportP1.find(`[name="cb-all"]`);
+
+				const $btnExport = $win.find(`[name="export"]`);
+				$btnExport.off("click").click(() => {
+					const CATS = [
+						"characters",
+						"decks",
+						"handouts",
+						"maps",
+						"rolltables",
+					];
+
+					$winExportP1.dialog("open");
+
+					$cbAllExport.off("change").on("change", () => {
+						CATS.forEach(cat => $winExportP1.find(`input[name="cb-${cat}"]`).prop("checked", $cbAllExport.prop("checked")))
+					});
+
+					$winExportP1.find("button").off("click").click(() => {
+						const isCatSelected = (name) => $winExportP1.find(`input[name="cb-${name}"]`).prop("checked");
+
+						const catsToExport = new Set(CATS.filter(it => isCatSelected(it)));
+
+						console.log("Exporting journal...");
+						const journal = d20plus.importer.getExportableJournal();
+
+						let maps;
+						if (catsToExport.has("maps")) {
+							console.log("Exporting maps...");
+							maps = d20.Campaign.pages.models.map(map => ({ // shoutouts to Stormy
+								attributes: map.attributes,
+								graphics: map.thegraphics.map(g => g.attributes),
+								text: map.thetexts.map(t => t.attributes),
+								paths: map.thepaths.map(p => p.attributes)
+							}));
+						}
+
+						let rolltables;
+						if (catsToExport.has("rolltables")) {
+							console.log("Exporting rolltables...");
+							rolltables = d20.Campaign.rollabletables.models.map(rolltable => ({
+								attributes: rolltable.attributes,
+								tableitems: rolltable.tableitems.models.map(tableitem => tableitem.attributes)
+							}));
+						}
+
+						let decks;
+						if (catsToExport.has("decks")) {
+							console.log("Exporting decks...");
+							decks = d20.Campaign.decks.models.map(deck => {
+								if (deck.name && deck.name.toLowerCase() === "playing cards") return;
+								return {
+									attributes: deck.attributes,
+									cards: deck.cards.models.map(card => card.attributes)
+								};
+							}).filter(it => it);
+						}
+
+						let blobCount = 0;
+						let onBlobsReady = null;
+						let anyBlobs = false;
+
+						const handleBlob = (addTo, asKey, data) => {
+							addTo[asKey] = data;
+							blobCount--;
+							if (onBlobsReady && blobCount === 0) onBlobsReady();
+						};
+
+						let characters;
+						if (catsToExport.has("characters")) {
+							anyBlobs = true;
+							console.log("Exporting characters...");
+							characters = d20.Campaign.characters.models.map(character => {
+								const out = {
+									attributes: character.attributes,
+									attribs: character.attribs,
+								};
+								const abilities = (character.abilities || {models: []}).models.map(ability => ability.attributes);
+								if (abilities && abilities.length) out.abilities = abilities;
+								blobCount += 3;
+								character._getLatestBlob("bio", (data) => handleBlob(out, "blobBio", data));
+								character._getLatestBlob("gmnotes", (data) => handleBlob(out, "blobGmNotes", data));
+								character._getLatestBlob("defaulttoken", (data) => handleBlob(out, "blobDefaultToken", data));
+								return out;
+							});
+						}
+
+						let handouts;
+						if (catsToExport.has("handouts")) {
+							anyBlobs = true;
+							console.log("Exporting handouts...");
+							handouts = d20.Campaign.handouts.models.map(handout => {
+								if (handout.attributes.name === ART_HANDOUT || handout.attributes.name === CONFIG_HANDOUT) return;
+
+								const out = {
+									attributes: handout.attributes
+								};
+								blobCount += 2;
+								handout._getLatestBlob("notes", (data) => handleBlob(out, "blobNotes", data));
+								handout._getLatestBlob("gmnotes", (data) => handleBlob(out, "blobGmNotes", data));
+								return out;
+							}).filter(it => it);
+						}
+
+						if (anyBlobs) console.log("Waiting for blobs...");
+						onBlobsReady = () => {
+							if (anyBlobs) console.log("Blobs are ready!");
+
+							console.log("Preparing payload");
+
+							const payload = {
+								schema_version: 1, // version number from r20es
+							};
+							if (maps) payload.maps = maps;
+							if (rolltables) payload.rolltables = rolltables;
+							if (decks) payload.decks = decks;
+							if (journal) payload.journal = journal;
+							if (handouts) payload.handouts = handouts;
+							if (characters) payload.characters = characters;
+
+							const filename = document.title.replace(/\|\s*Roll20$/i, "").trim().replace(/[^\w\-]/g, "_");
+							const data = JSON.stringify(payload, null, "\t");
+
+							console.log("Saving");
+							const blob = new Blob([data], {type: "application/json"});
+							d20plus.ut.saveAs(blob, `${filename}.json`);
+						};
+						if (!anyBlobs) onBlobsReady();
+					});
+
+
+					// TODO
+					/*
+					macro
+					jukebox track
+					 */
+				});
+			}
+		}
+	];
+
+	d20plus.tool.get = (toolId) => {
+		return d20plus.tool.tools.find(it => it.toolId === toolId);
+	};
+
+	d20plus.tool.addTools = () => {
+		const $body = $(`body`);
+		const $tools = $(`#d20-tools-list`);
+		const $toolsList = $tools.find(`.tools-list`);
+		d20plus.tool.tools.sort((a, b) => SortUtil.ascSortLower(a.name || "", b.name || "")).forEach(t => {
+			$body.append(t.html); // add HTML
+			try {
+				t.dialogFn(); // init window
+				// add tool row
+				const $wrp = $(`<div class="tool-row"/>`);
+				$wrp.append(`<span style="width: 20%; padding: 4px;">${t.name}</span>`);
+				$wrp.append(`<span style="width: calc(60% - 8px); padding: 4px;">${t.desc}</span>`);
+				$(`<a style="width: 15%;" class="btn" href="#">Open</a>`).on(mousedowntype, () => {
+					t.openFn.bind(t)();
+					$tools.dialog("close");
+				}).appendTo($wrp);
+				$toolsList.append($wrp);
+			} catch (e) {
+				console.error(`Failed to initialise tool "${t.name}"`);
+				setTimeout(() => {
+					throw e;
+				}, 1);
+			}
+		});
+
+		$tools.dialog({
+			autoOpen: false,
+			resizable: true,
+			width: 800,
+			height: 650,
+		});
+		$(`#button-view-tools`).on(mousedowntype, () => {
+			$tools.dialog("open");
+		});
+	};
+}
+
+SCRIPT_EXTENSIONS.push(baseTool);
+
+
+function d20plusArt () {
+	d20plus.art = {
+		button: () => {
+			// add external art button was clicked
+			const $art = $("#d20plus-artfolder");
+			$art.dialog("open");
+			const $artList = $art.find(`.list`);
+			$artList.empty();
+
+			if (d20plus.art.custom) {
+				d20plus.art.custom.forEach(a => {
+					const $liArt = getArtLi(a.name, a.url);
+					$artList.append($liArt);
+				});
+			}
+
+			// init list library
+			const artList = new List("art-list-container", {
+				valueNames: ["name"],
+				listClass: "artlist"
+			});
+
+			const $btnAdd = $(`#art-list-add-btn`);
+			const $iptAddName = $(`#art-list-add-name`);
+			const $iptAddUrl = $(`#art-list-add-url`);
+			$btnAdd.off("click");
+			$btnAdd.on("click", () => {
+				const name = $iptAddName.val().trim();
+				const url = $iptAddUrl.val().trim();
+				if (!name || !url) {
+					alert("Missing required fields!")
+				} else {
+					artList.search();
+					artList.filter();
+					const $liArt = getArtLi(name, url);
+					$artList.append($liArt);
+					refreshCustomArtList();
+				}
+			});
+
+			const $btnMassAdd = $(`#art-list-multi-add-btn`);
+			$btnMassAdd.off("click");
+			$btnMassAdd.on("click", () => {
+				$("#d20plus-artmassadd").dialog("open");
+				const $btnMassAddSubmit = $(`#art-list-multi-add-btn-submit`);
+				$btnMassAddSubmit.off("click");
+				$btnMassAddSubmit.on("click", () => {
+					artList.search();
+					artList.filter();
+					const $iptUrls = $(`#art-list-multi-add-area`);
+					const massUrls = $iptUrls.val();
+					const spl = massUrls.split("\n").map(s => s.trim()).filter(s => s);
+					if (!spl.length) return;
+					else {
+						const delim = "---";
+						const toAdd = [];
+						for (const s of spl) {
+							if (!s.includes(delim)) {
+								alert(`Badly formatted line: ${s}`)
+								return;
+							} else {
+								const parts = s.split(delim);
+								if (parts.length !== 2) {
+									alert(`Badly formatted line: ${s}`)
+									return;
+								} else {
+									toAdd.push({
+										name: parts[0],
+										url: parts[1]
+									});
+								}
+							}
+						}
+						toAdd.forEach(a => {
+							$artList.append(getArtLi(a.name, a.url));
+						});
+						refreshCustomArtList();
+						$("#d20plus-artmassadd").dialog("close");
+					}
+				});
+			});
+
+			makeDraggables();
+			d20plus.art.refreshList = refreshCustomArtList;
+
+			function getArtLi (name, url) {
+				const showImage = d20plus.cfg.getCfgVal("interface", "showCustomArtPreview");
+				const $liArt = $(`
+						<li class="dd-item library-item draggableresult Vetools-draggable-art ui-draggable" data-fullsizeurl="${url}">
+							${showImage ? `<img src="${url}" style="width: 30px; max-height: 30px; display: inline-block" draggable="false">` : ""}
+							<div class="dd-content name" style="display: inline-block; width: 35%;" data-url="${url}">${name}</div>
+							<a href="${url}"><span class="url" style="display: inline-block; width: ${showImage ? "40%" : "55%"};">${url}</span></a>
+						</li>
+					`);
+				if (!showImage) {
+					$liArt.on("mousedown", () => {
+						const $loader = $(`<div class="temp-warning">Loading image - don't drop yet!</div>`);
+						const $img = $(`<img src="${url}" style="width: 30px; max-height: 30px; display: none">`);
+						if (!$img.prop("complete")) {
+							$(`body`).append($loader);
+							$img.on("load", () => {
+								$loader.remove();
+							});
+							$loader.append($img);
+						}
+					});
+				}
+
+				const $btnDel = $(`<span class="delete btn btn-danger"><span class="pictos">#</span></span>`).on("click", () => {
+					$liArt.remove();
+					refreshCustomArtList();
+				});
+				$liArt.append($btnDel);
+				return $liArt;
+			}
+
+			function refreshCustomArtList () {
+				artList.reIndex();
+				const custom = [];
+				artList.items.forEach(i => {
+					const $ele = $(i.elm);
+					custom.push({
+						name: $ele.find(`.name`).text(),
+						url: $ele.find(`.url`).text()
+					});
+				});
+				d20plus.art.custom = custom;
+				makeDraggables();
+				saveToHandout();
+			}
+
+			function makeDraggables () {
+				$(`.Vetools-draggable-art`).draggable({
+					handle: ".dd-content",
+					revert: true,
+					revertDuration: 0,
+					helper: "clone",
+					appendTo: "body"
+				})
+			}
+
+			function saveToHandout () {
+				const handout = d20plus.art.getArtHandout();
+				if (!handout) {
+					d20.Campaign.handouts.create({
+						name: ART_HANDOUT
+					}, {
+						success: function (handout) {
+							notecontents = "This handout is used to store custom art URLs."
+
+							const gmnotes = JSON.stringify(d20plus.art.custom);
+							handout.updateBlobs({notes: notecontents, gmnotes: gmnotes});
+							handout.save({notes: (new Date).getTime(), inplayerjournals: ""});
+						}
+					});
+				} else {
+					const gmnotes = JSON.stringify(d20plus.art.custom);
+					handout.updateBlobs({gmnotes: gmnotes});
+					handout.save({notes: (new Date).getTime()});
+				}
+			}
+		},
+
+		// TODO load a decent default art library from somewhere
+		default: [
+			{
+				name: "Phoenix",
+				url: "http://www.discgolfbirmingham.com/wordpress/wp-content/uploads/2014/04/phoenix-rising.jpg"
+			}
+		]
+	};
+
+	d20plus.art.getArtHandout = () => {
+		return d20.Campaign.handouts.models.find((handout) => {
+			return handout.attributes.name === ART_HANDOUT;
+		});
+	};
+
+	d20plus.art.loadArt = (nextFn) => {
+		d20plus.ut.log("Loading custom art");
+		const handout = d20plus.art.getArtHandout();
+		if (handout) {
+			handout.view.render();
+			handout._getLatestBlob("gmnotes", function (gmnotes) {
+				const decoded = decodeURIComponent(gmnotes);
+				try {
+					d20plus.art.custom = JSON.parse(decoded);
+					nextFn();
+				} catch (e) {
+					nextFn();
+				}
+			});
+		} else {
+			nextFn();
+		}
+	};
+
+	d20plus.art.addCustomArtSearch = () => {
+		d20plus.ut.log("Add custom art search");
+		const $afterTo = $(`#libraryresults`);
+		$afterTo.after(d20plus.artListHTML);
+
+		const $olNone = $(`#image-search-none`);
+		const $olHasResults = $(`#image-search-has-results`);
+
+		const $olArt = $(`#custom-art-results`);
+		const $srchImages = $(`#imagedialog .searchbox input.keywords`);
+		$srchImages.on("keyup", () => {
+			$olArt.empty();
+			const searched = $srchImages.val().trim().toLowerCase();
+			if (searched.length < 2) {
+				$olNone.show();
+				$olHasResults.hide();
+				return;
+			}
+
+			let toShow = d20plus.art.default.filter(a => a.name.toLowerCase().includes(searched));
+			if (d20plus.art.custom) toShow = toShow.concat(d20plus.art.custom.filter(a => a.name.toLowerCase().includes(searched)));
+
+			if (!toShow.length) {
+				$olNone.show();
+				$olHasResults.hide();
+			} else {
+				$olNone.hide();
+				$olHasResults.show();
+
+				toShow.forEach(a => {
+					$olArt.append(`
+				<li class="dd-item library-item draggableresult Vetoolsresult ui-draggable" data-fullsizeurl="${a.url}">
+					<div class="dd-content">
+						<div class="token"><img src="${a.url}" draggable="false"></div>
+						<div class="name">
+							<div class="namecontainer"><a href="${a.url}" rel="external">${a.name}</a></div>
+						</div>
+					</div>
+				</li>
+			`);
+				});
+			}
+
+			$("#imagedialog #Vetoolsresults .draggableresult").draggable({
+				handle: ".dd-content",
+				revert: true,
+				revertDuration: 0,
+				helper: "clone",
+				appendTo: "body"
+			}).addTouch();
+		});
+	};
+
+	d20plus.art.initArtFromUrlButtons = () => {
+		d20plus.ut.log("Add direct URL art buttons");
+		$("#tmpl_charactereditor").replaceWith(d20plus.template_charactereditor);
+		$("#tmpl_handouteditor").replaceWith(d20plus.template_handouteditor);
+
+		$(`.character-image-by-url`).live("click", function () {
+			const cId = $(this).closest(`[data-characterid]`).attr(`data-characterid`);
+			const url = window.prompt("Enter a URL", "https://example.com/pic.png");
+			if (url) {
+				d20.Campaign.characters.get(cId).set("avatar", url);
+			}
+		});
+
+		$(`.handout-image-by-url`).live("click", function () {
+			const hId = $(this).closest(`[data-handoutid]`).attr(`data-handoutid`);
+			const url = window.prompt("Enter a URL", "https://example.com/pic.png");
+			if (url) {
+				d20.Campaign.handouts.get(hId).set("avatar", url);
+			}
+		});
+
+		$(`.token-image-by-url`).live("click", function () {
+			const cId = $(this).closest(`[data-characterid]`).attr(`data-characterid`);
+			const url = window.prompt("Enter a URL", "https://example.com/pic.png");
+			if (url) {
+				const char = d20.Campaign.characters.get(cId);
+				char._getLatestBlob("defaulttoken", (blob) => {
+					blob = blob && blob.trim() ? JSON.parse(blob) : {};
+					blob.imgsrc = url;
+					char.updateBlobs({defaulttoken: JSON.stringify(blob)});
+				});
+			}
+		});
+	};
+}
+
+SCRIPT_EXTENSIONS.push(d20plusArt);
+
+
+function d20plusUi () {
+	d20plus.engine = {};
+
+	d20plus.engine.addProFeatures = () => {
+		d20plus.ut.log("Add Pro features");
+
+		d20plus.setMode = d20plus.mod.setMode;
+		window.setMode = d20plus.mod.setMode;
+
+		// rebind buttons with new setMode
+		const $drawTools = $("#drawingtools");
+		const $rect = $drawTools.find(".chooserect");
+		const $path = $drawTools.find(".choosepath");
+		const $poly = $drawTools.find(".choosepolygon");
+		$drawTools.unbind(clicktype).bind(clicktype, () => {
+			$(this).hasClass("rect") ? setMode("rect") : $(this).hasClass("text") ? setMode("text") : $(this).hasClass("path") ? setMode("path") : $(this).hasClass("drawselect") ? setMode("drawselect") : $(this).hasClass("polygon") && setMode("polygon")
+		});
+		$rect.unbind(clicktype).bind(clicktype, () => {
+			setMode("rect");
+			return false;
+		});
+		$path.unbind(clicktype).bind(clicktype, () => {
+			setMode("path");
+			return false;
+		});
+		$poly.unbind(clicktype).bind(clicktype, () => {
+			setMode("polygon");
+			return false;
+		});
+		$("#rect").unbind(clicktype).bind(clicktype, () => setMode("rect"));
+		$("#path").unbind(clicktype).bind(clicktype, () => setMode("path"));
+
+		if (!$(`#fxtools`).length) {
+			const $fxMode = $(`<li id="fxtools"/>`).append(`<span class="pictos">e</span>`);
+			$fxMode.on("click", () => {
+				d20plus.setMode("fxtools");
+			});
+			$(`#drawingtools`).after($fxMode);
+		}
+
+		// bind new hotkeys
+		Mousetrap.bind("q q", function () { // default ruler on q-q
+			setMode("measure");
+			$(`#measure_mode`).val("1").trigger("change");
+			return false;
+		});
+
+		Mousetrap.bind("q r", function () { // radius
+			setMode("measure");
+			$(`#measure_mode`).val("2").trigger("change");
+			return false;
+		});
+
+		Mousetrap.bind("q c", function () { // cone
+			setMode("measure");
+			$(`#measure_mode`).val("3").trigger("change");
+			return false;
+		});
+
+		Mousetrap.bind("q e", function () { // box
+			setMode("measure");
+			$(`#measure_mode`).val("4").trigger("change");
+			return false;
+		});
+
+		Mousetrap.bind("q w", function () { // line
+			setMode("measure");
+			$(`#measure_mode`).val("5").trigger("change");
+			return false;
+		});
+
+		if (window.is_gm) {
+			// add lighting layer tool
+			if (!$(`#editinglayer .choosewalls`).length) {
+				$(`#editinglayer .choosegmlayer`).after(`<li class="choosewalls"><span class="pictostwo">r</span> Dynamic Lighting</li>`);
+			}
+
+			// ensure tokens have editable sight
+			$("#tmpl_tokeneditor").replaceWith(d20plus.template_TokenEditor);
+			// show dynamic lighting/etc page settings
+			$("#tmpl_pagesettings").replaceWith(d20plus.template_pageSettings);
+			$("#page-toolbar").on("mousedown", ".settings", function () {
+				var e = d20.Campaign.pages.get($(this).parents(".availablepage").attr("data-pageid"));
+				e.view._template = $.jqotec("#tmpl_pagesettings");
+			});
+		}
+	};
+
+	d20plus.engine.enhanceMeasureTool = () => {
+		d20plus.ut.log("Enhance Measure tool");
+
+		// add extra toolbar
+		const $wrpBar = $(`#secondary-toolbar`);
+		const toAdd = `
+				<ul class="mode measure" style="display: none;">
+					<li>
+						<select id="measure_mode" style="width: 100px;">
+							<option value="1" selected>Ruler</option>
+							<option value="2">Radius</option>
+							<option value="3">Cone</option>
+							<option value="4">Box</option>
+							<option value="5">Line</option>
+						</select>
+					</li>
+					<li class="measure_mode_sub measure_mode_sub_2" style="display: none;">
+						<select id="measure_mode_sel_2" style="width: 100px;">
+							<option value="1" selected>Burst</option>
+							<option value="2">Blast</option>
+						</select>
+					</li>
+					<li class="measure_mode_sub measure_mode_sub_3" style="display: none;">
+						<input type="number" min="0" id="measure_mode_ipt_3" style="width: 45px;" value="1">
+						<label style="display: inline-flex;" title="The PHB cone rules are the textbook definition of one radian.">rad.</label>
+						<select id="measure_mode_sel_3" style="width: 120px;">
+							<option value="1" selected>Edge: Flat</option>
+							<option value="2">Edge: Rounded</option>
+						</select>
+					</li>
+					<li class="measure_mode_sub measure_mode_sub_4" style="display: none;">
+						<select id="measure_mode_sel_4" style="width: 100px;">
+							<option value="1" selected>Burst</option>
+							<option value="2">Blast</option>
+						</select>
+					</li>
+					<li class="measure_mode_sub measure_mode_sub_5" style="display: none;">
+						<select id="measure_mode_sel_5" style="width: 120px;">
+							<option value="1" selected>Total Width: </option>
+							<option value="2">Width To Edge: </option>
+						</select>
+						<input type="number" min="0" id="measure_mode_ipt_5" style="width: 40px;" value="5">
+						<label style="display: inline-flex;">units</label>
+					</li>
+				</ul>`;
+		$wrpBar.append(toAdd);
+
+		$(`#measure`).click(() => {
+			d20plus.setMode("measure");
+		});
+		const $selMeasure = $(`#measure_mode`);
+		$selMeasure.on("change", () => {
+			$(`.measure_mode_sub`).hide();
+			$(`.measure_mode_sub_${$selMeasure.val()}`).show();
+		});
+
+		// 	const event = {
+		// 		type: "Ve_measure_clear_sticky",
+		// 		player: window.currentPlayer.id,
+		// 		time: (new Date).getTime()
+		// 	};
+		// 	d20.textchat.sendShout(event)
+
+		d20.textchat.shoutref.on("value", function(e) {
+			if (!d20.textchat.chatstartingup) {
+				var t = e.val();
+				if (t) {
+					const msg = JSON.parse(t);
+					if (window.DEBUG) console.log("SHOUT: ", msg);
+
+					switch (msg.type) {
+						// case "Ve_measure_clear_sticky": {
+						// 	delete d20plus._stickyMeasure[msg.player];
+						// 	d20.engine.debounced_renderTop();
+						// }
+					}
+				}
+			}
+		});
+
+		d20plus.mod.drawMeasurements();
+	};
+
+	d20plus.engine._addStatusEffectEntries = () => {
+		const sheetUrl = window.is_gm ? d20plus.cfg.getCfgVal("token", "statusSheetUrl") || d20plus.cfg.getCfgDefaultVal("token", "statusSheetUrl"): window.Campaign.attributes.bR20cfg_statussheet;
+
+		const temp = new Image();
+		temp.onload = () => {
+			const xSize = 34;
+			const iMin = 47;
+			// const iMax = 101;
+			const iMax = Math.ceil(temp.width / xSize); // round the last one up to a full image
+			for (let i = iMin; i < iMax; ++i) {
+				d20.token_editor.statusmarkers["5etools_" + (i - iMin)] = String(i * xSize);
+			}
+		};
+		temp.src = sheetUrl;
+
+		$(`#5etools-status-css`).html(`#radial-menu .markermenu .markericon {
+				background-image: url(${sheetUrl});
+			}`);
+	};
+
+	d20plus.engine._removeStatusEffectEntries = () => {
+		$(`#5etools-status-css`).html("");
+		Object.keys(d20.token_editor.statusmarkers).filter(k => k.startsWith("5etools_")).forEach(k => delete d20.token_editor.statusmarkers[k]);
+	};
+
+	d20plus.engine.enhanceStatusEffects = () => {
+		d20plus.ut.log("Enhance status effects");
+		$(`head`).append(`<style id="5etools-status-css"/>`);
+		d20plus.cfg._handleStatusTokenConfigChange();
+
+		d20plus.mod.overwriteStatusEffects();
+
+		d20.engine.canvas.off("object:added");
+		d20.engine.canvas.on("object:added", d20plus.mod.overwriteStatusEffects);
+
+		// the holy trinity
+		// d20.engine.canvas.on("object:removed", () => console.log("added"));
+		// d20.engine.canvas.on("object:removed", () => console.log("removed"));
+		// d20.engine.canvas.on("object:modified", () => console.log("modified"));
+
+		$(document).off("mouseenter", ".markermenu");
+		$(document).on("mouseenter", ".markermenu", d20plus.mod.mouseEnterMarkerMenu)
+	};
+
+	d20plus.engine.enhancePageSelector = () => {
+		d20plus.ut.log("Enhancing page selector");
+		var updatePageOrder = function () {
+			d20plus.ut.log("Saving page order...");
+			var pos = 0;
+			$("#page-toolbar .pages .chooseablepage").each(function () {
+				var page = d20.Campaign.pages.get($(this).attr("data-pageid"));
+				page && page.save({
+					placement: pos
+				});
+				pos++;
+			});
+			d20.pagetoolbar.noReload = false;
+			d20.pagetoolbar.refreshPageListing();
+		}
+
+		function overwriteDraggables () {
+			// make them draggable on both axes
+			$("#page-toolbar .pages").sortable("destroy");
+			$("#page-toolbar .pages").sortable({
+				items: "> .chooseablepage",
+				start: function () {
+					d20.pagetoolbar.noReload = true;
+				},
+				stop: function () {
+					updatePageOrder()
+				},
+				distance: 15
+			}).addTouch();
+			$("#page-toolbar .playerbookmark").draggable("destroy");
+			$("#page-toolbar .playerbookmark").draggable({
+				revert: "invalid",
+				appendTo: "#page-toolbar",
+				helper: "original"
+			}).addTouch();
+			$("#page-toolbar .playerspecificbookmark").draggable("destroy");
+			$("#page-toolbar .playerspecificbookmark").draggable({
+				revert: "invalid",
+				appendTo: "#page-toolbar",
+				helper: "original"
+			}).addTouch();
+		}
+
+		overwriteDraggables();
+		$(`#page-toolbar`).css("top", "calc(-90vh + 40px)");
+
+		const originalFn = d20.pagetoolbar.refreshPageListing;
+		d20.pagetoolbar.refreshPageListing = () => {
+			originalFn();
+			// original function is debounced at 100ms, so debounce this at 110ms and hope for the best
+			_.debounce(() => {
+				overwriteDraggables();
+			}, 110)();
+		}
+	};
+
+	d20plus.engine.initQuickSearch = ($iptSearch, $outSearch) => {
+		$iptSearch.on("keyup", () => {
+			const searchVal = ($iptSearch.val() || "").trim();
+			$outSearch.empty();
+			if (searchVal.length <= 2) return; // ignore 2 characters or less, for performance reasons
+			const found = $(`#journal .content`).find(`li[data-itemid]`).filter((i, ele) => {
+				const $ele = $(ele);
+				return $ele.find(`.name`).text().trim().toLowerCase().includes(searchVal.toLowerCase());
+			});
+			if (found.length) {
+				$outSearch.append(`<p><b>Search results:</b></p>`);
+				const $outList = $(`<ol class="dd-list Vetools-search-results"/>`);
+				$outSearch.append($outList);
+				found.clone().addClass("Vetools-draggable").appendTo($outList);
+				$outSearch.append(`<hr>`);
+				$(`.Vetools-search-results .Vetools-draggable`).draggable({
+					revert: true,
+					distance: 10,
+					revertDuration: 0,
+					helper: "clone",
+					handle: ".namecontainer",
+					appendTo: "body",
+					scroll: true,
+					start: function () {
+						$("#journalfolderroot").addClass("externaldrag")
+					},
+					stop: function () {
+						$("#journalfolderroot").removeClass("externaldrag")
+					}
+				});
+			}
+		});
+	};
+
+	d20plus.engine.addSelectedTokenCommands = () => {
+		d20plus.ut.log("Add token rightclick commands");
+		$("#tmpl_actions_menu").replaceWith(d20plus.template_actionsMenu);
+
+		Mousetrap.bind("b b", function () { // back on layer
+			const n = d20plus.engine._getSelectedToMove();
+			d20plus.engine.backwardOneLayer(n);
+			return false;
+		});
+
+		Mousetrap.bind("b f", function () { // forward one layer
+			const n = d20plus.engine._getSelectedToMove();
+			d20plus.engine.forwardOneLayer(n);
+			return false;
+		});
+
+		// BEGIN ROLL20 CODE
+		var e, t = !1, n = [];
+		var i = function() {
+			t && (t.remove(),
+				t = !1),
+			e && clearTimeout(e)
+		};
+		var r = function (r) {
+			var o, a;
+			r.changedTouches && r.changedTouches.length > 0 ? (o = r.changedTouches[0].pageX,
+				a = r.changedTouches[0].pageY) : (o = r.pageX,
+				a = r.pageY),
+				i(),
+				n = [];
+			for (var s = [], l = d20.engine.selected(), c = 0; c < l.length; c++)
+				n.push(l[c]),
+					s.push(l[c].type);
+			if (s = _.uniq(s),
+			n.length > 0)
+				if (1 == s.length) {
+					var u = n[0];
+					t = $("image" == u.type && 0 == u.model.get("isdrawing") ? $("#tmpl_actions_menu").jqote(u.model) : $("#tmpl_actions_menu").jqote(u.model))
+				} else {
+					var u = n[0];
+					t = $($("#tmpl_actions_menu").jqote(u.model))
+				}
+			else
+				t = $($("#tmpl_actions_menu").jqote({}));
+			if (!window.is_gm && t[0].lastElementChild.childElementCount < 1)
+				return !1;
+			t.appendTo("body");
+			var d = t.height()
+				, h = t.width()
+				, p = {};
+			return p.top = a > $("#editor-wrapper").height() - $("#playerzone").height() - d - 100 ? a - d + "px" : a + "px",
+				p.left = o > $("#editor-wrapper").width() - h ? o + 10 - h + "px" : o + 10 + "px",
+				t.css(p),
+				$(".actions_menu").bind("mousedown mouseup touchstart", function(e) {
+					e.stopPropagation()
+				}),
+				$(".actions_menu ul > li").bind("mouseover touchend", function() {
+					if (e && (clearTimeout(e),
+						e = !1),
+					$(this).parents(".hasSub").length > 0)
+						;
+					else if ($(this).hasClass("hasSub")) {
+						$(".actions_menu").css({
+							width: "215px",
+							height: "250px"
+						});
+						var t = this;
+						_.defer(function() {
+							$(".actions_menu ul.submenu").hide(),
+								$(t).find("ul.submenu:hidden").show()
+						})
+					} else
+						$(".actions_menu ul.submenu").hide()
+				}),
+				$(".actions_menu ul.submenu").live("mouseover", function() {
+					e && (clearTimeout(e),
+						e = !1)
+				}),
+				$(".actions_menu, .actions_menu ul.submenu").live("mouseleave", function() {
+					e || (e = setTimeout(function() {
+						$(".actions_menu ul.submenu").hide(),
+							$(".actions_menu").css("width", "100px").css("height", "auto"),
+							e = !1
+					}, 500))
+				}),
+				$(".actions_menu li").on(clicktype, function() {
+					var e = $(this).attr("data-action-type");
+					if (null != e) {
+						if ("copy" == e)
+							d20.clipboard.doCopy(),
+								i();
+						else if ("paste" == e)
+							d20.clipboard.doPaste(),
+								i();
+						else if ("delete" == e) {
+							var t = d20.engine.selected();
+							d20.engine.canvas.deactivateAllWithDispatch();
+							for (var r = 0; r < t.length; r++)
+								t[r].model.destroy();
+							i()
+						} else if ("undo" == e)
+							d20.undo && d20.undo.doUndo(),
+								i();
+						else if ("tofront" == e)
+							d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
+								_.each(n, function(e) {
+									d20.engine.canvas.bringToFront(e)
+								}),
+								d20.Campaign.activePage().debounced_recordZIndexes(),
+								i();
+						else if ("toback" == e)
+							d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
+								_.each(n, function(e) {
+									d20.engine.canvas.sendToBack(e)
+								}),
+								d20.Campaign.activePage().debounced_recordZIndexes(),
+								i();
+						else if (-1 !== e.indexOf("tolayer_")) {
+							d20.engine.unselect();
+							var o = e.replace("tolayer_", "");
+							_.each(n, function(e) {
+								e.model.save({
+									layer: o
+								})
+							}),
+								i(),
+								d20.token_editor.removeRadialMenu()
+						} else if ("addturn" == e)
+							_.each(n, function(e) {
+								d20.Campaign.initiativewindow.addTokenToList(e.model.id)
+							}),
+								i(),
+							d20.tutorial && d20.tutorial.active && $(document.body).trigger("addedTurn");
+						else if ("group" == e) {
+							var a = [];
+							d20.engine.unselect(),
+								_.each(n, function(e) {
+									a.push(e.model.id)
+								}),
+								_.each(n, function(e) {
+									e.model.addToGroup(a)
+								}),
+								i();
+							var s = n[0];
+							d20.engine.select(s)
+						} else if ("ungroup" == e)
+							d20.engine.unselect(),
+								_.each(n, function(e) {
+									e.model.clearGroup()
+								}),
+								d20.token_editor.removeRadialMenu(),
+								i();
+						else if ("toggledrawing" == e)
+							d20.engine.unselect(),
+								_.each(n, function(e) {
+									e.model.set({
+										isdrawing: !e.model.get("isdrawing")
+									}).save()
+								}),
+								i(),
+								d20.token_editor.removeRadialMenu();
+						else if ("toggleflipv" == e)
+							d20.engine.unselect(),
+								_.each(n, function(e) {
+									e.model.set({
+										flipv: !e.model.get("flipv")
+									}).save()
+								}),
+								i(),
+								d20.token_editor.removeRadialMenu();
+						else if ("togglefliph" == e)
+							d20.engine.unselect(),
+								_.each(n, function(e) {
+									e.model.set({
+										fliph: !e.model.get("fliph")
+									}).save()
+								}),
+								i(),
+								d20.token_editor.removeRadialMenu();
+						else if ("takecard" == e)
+							d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
+								_.each(n, function(e) {
+									var t = d20.decks.cardByID(e.model.get("cardid"));
+									if (e.model.get("isdrawing") === !1)
+										var n = {
+											bar1_value: e.model.get("bar1_value"),
+											bar1_max: e.model.get("bar1_max"),
+											bar2_value: e.model.get("bar2_value"),
+											bar2_max: e.model.get("bar2_max"),
+											bar3_value: e.model.get("bar3_value"),
+											bar3_max: e.model.get("bar3_max")
+										};
+									d20.Campaign.hands.addCardToHandForPlayer(t, window.currentPlayer, n ? n : void 0),
+										_.defer(function() {
+											e.model.destroy()
+										})
+								}),
+								d20.engine.unselect(),
+								i();
+						else if ("flipcard" == e)
+							d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
+								_.each(n, function(e) {
+									var t = e.model.get("sides").split("|")
+										, n = e.model.get("currentSide")
+										, i = n + 1;
+									i > t.length - 1 && (i = 0),
+										e.model.set({
+											currentSide: i,
+											imgsrc: unescape(t[i])
+										}).save()
+								}),
+								i();
+						else if ("setdimensions" == e) {
+							var l = n[0]
+								, c = $($("#tmpl_setdimensions").jqote()).dialog({
+								title: "Set Dimensions",
+								width: 325,
+								height: 225,
+								buttons: {
+									Set: function() {
+										var e, t;
+										"pixels" == c.find(".dimtype").val() ? (e = parseInt(c.find("input.width").val(), 10),
+											t = parseInt(c.find("input.height").val(), 10)) : (e = parseFloat(c.find("input.width").val()) * window.dpi,
+											t = parseFloat(c.find("input.height").val()) * window.dpi),
+											l.model.save({
+												width: e,
+												height: t
+											}),
+											c.off("change"),
+											c.dialog("destroy").remove()
+									},
+									Cancel: function() {
+										c.off("change"),
+											c.dialog("destroy").remove()
+									}
+								},
+								beforeClose: function() {
+									c.off("change"),
+										c.dialog("destroy").remove()
+								}
+							});
+							c.on("change", ".dimtype", function() {
+								"pixels" == $(this).val() ? (c.find("input.width").val(Math.round(l.get("width"))),
+									c.find("input.height").val(Math.round(l.get("height")))) : (c.find("input.width").val(l.get("width") / window.dpi),
+									c.find("input.height").val(l.get("height") / window.dpi))
+							}),
+								c.find(".dimtype").trigger("change"),
+								i()
+						} else if ("aligntogrid" == e)
+							if (0 === d20.Campaign.activePage().get("snapping_increment")) {
+								i();
+								var u = $($("#tmpl_grid-disabled").jqote(h)).dialog({
+									title: "Grid Off",
+									buttons: {
+										Ok: function() {
+											u.off("change"),
+												u.dialog("destroy").remove()
+										}
+									},
+									beforeClose: function() {
+										u.off("change"),
+											u.dialog("destroy").remove()
+									}
+								})
+							} else
+								d20.engine.gridaligner.target = n[0],
+									d20plus.setMode("gridalign"),
+									i();
+						else if ("side_random" == e) {
+							d20.engine.canvas.getActiveGroup() && d20.engine.unselect();
+							var d = [];
+							_.each(n, function(e) {
+								if (e.model && "" != e.model.get("sides")) {
+									var t = e.model.get("sides").split("|")
+										, n = t.length
+										, i = d20.textchat.diceengine.random(n);
+
+									const imgUrl = unescape(t[i]);
+									e.model.save(getRollableTokenUpdate(imgUrl, i)),
+										d.push(t[i])
+								}
+							}),
+								d20.textchat.rawChatInput({
+									type: "tokenroll",
+									content: d.join("|")
+								}),
+								i()
+						} else if ("side_choose" == e) {
+							var l = n[0]
+								, h = l.model.toJSON()
+								, p = h.currentSide;
+							h.sidesarray = h.sides.split("|");
+							var c = $($("#tmpl_chooseside").jqote(h)).dialog({
+								title: "Choose Side",
+								width: 325,
+								height: 225,
+								buttons: {
+									Choose: function() {
+										const imgUrl = unescape(h.sidesarray[p]);
+										d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
+											l.model.save(getRollableTokenUpdate(imgUrl, p)),
+											l = null,
+											h = null,
+											c.off("slide"),
+											c.dialog("destroy").remove()
+									},
+									Cancel: function() {
+										l = null,
+											h = null,
+											c.off("slide"),
+											c.dialog("destroy").remove()
+									}
+								},
+								beforeClose: function() {
+									l = null,
+										h = null,
+										c.off("slide"),
+										c.dialog("destroy").remove()
+								}
+							});
+							c.find(".sideslider").slider({
+								min: 0,
+								max: h.sidesarray.length - 1,
+								step: 1,
+								value: h.currentSide
+							}),
+								c.on("slide", function(e, t) {
+									t.value != p && (p = t.value,
+										c.find(".sidechoices .sidechoice").hide().eq(t.value).show())
+								}),
+								c.find(".sidechoices .sidechoice").hide().eq(h.currentSide).show(),
+								i()
+						}
+						// BEGIN MOD
+						const showRollOptions = (formula, options) => {
+							const sel = d20.engine.selected();
+
+							options = options.map(it => `<option>${it}</option>`);
+
+							const dialog= $("<div><p style='font-size: 1.15em;'><strong>" + d20.utils.strip_tags("Select Save") + ":</strong> <select style='width: 150px; margin-left: 5px;'>" + options.join("") + "</select></p></div>");
+
+							dialog.dialog({
+								title: "Input Value",
+								beforeClose: function() {
+									return false;
+								},
+								buttons: {
+									Submit: function() {
+										const val = dialog.find("select").val();
+										console.log(val);
+										d20.engine.unselect();
+										sel.forEach(it => {
+											d20.engine.select(it);
+											const toRoll = formula(it, val);
+											d20.textchat.doChatInput(toRoll);
+											d20.engine.unselect();
+										});
+
+										dialog.off();
+										dialog.dialog("destroy").remove();
+										d20.textchat.$textarea.focus();
+									},
+									Cancel: function() {
+										dialog.off();
+										dialog.dialog("destroy").remove();
+									}
+								}
+							});
+
+							i();
+						};
+
+						if ("rollsaves" === e) {
+							const options = ["str", "dex", "con", "int", "wis", "cha"].map(it => Parser.attAbvToFull(it));
+							showRollOptions(
+								(token, val) => `@{selected|wtype} &{template:simple} {{charname=@{selected|token_name}}} {{always=1}} {{rname=${val} Save}} {{mod=@{selected|${val.toLowerCase()}_save_bonus}}} {{r1=[[1d20+@{selected|${val.toLowerCase()}_save_bonus}]]}} {{r2=[[1d20+@{selected|${val.toLowerCase()}_save_bonus}]]}}`,
+								options
+							);
+						} else if ("rollinit" === e) {
+							const sel = d20.engine.selected();
+							d20.engine.unselect();
+							sel.forEach(it => {
+								d20.engine.select(it);
+								const toRoll = `@{selected|wtype} &{template:simple} {{rname=Initiative}} {{charname=@{selected|token_name}}} {{mod=[[@{selected|initiative_bonus}]]}} {{r1=[[@{selected|d20}+@{selected|dexterity_mod} &{tracker}]]}}{{normal=1}}`;
+								d20.textchat.doChatInput(toRoll);
+								d20.engine.unselect();
+							});
+							i();
+						} else if ("rollskills" === e) {
+							const options = [
+								"Athletics",
+								"Acrobatics",
+								"Sleight of Hand",
+								"Stealth",
+								"Arcana",
+								"History",
+								"Investigation",
+								"Nature",
+								"Religion",
+								"Animal Handling",
+								"Insight",
+								"Medicine",
+								"Perception",
+								"Survival",
+								"Deception",
+								"Intimidation",
+								"Performance",
+								"Persuasion"
+							].sort();
+
+							showRollOptions(
+								(token, val) => {
+									const clean = val.toLowerCase().replace(/ /g, "_");
+									const abil = `${Parser.attAbvToFull(Parser.skillToAbilityAbv(val.toLowerCase())).toLowerCase()}_mod`;
+
+									const doRoll = (atb = abil) => {
+										return `@{selected|wtype} &{template:simple} {{charname=@{selected|token_name}}} {{always=1}} {{rname=${val}}} {{mod=@{selected|${atb}}}} {{r1=[[1d20+@{selected|${atb}}]]}} {{r2=[[1d20+@{selected|${atb}}]]}}`;
+									}
+
+									try {
+										if (token && token.model && token.model.toJSON && token.model.toJSON().represents) {
+											const charIdMaybe = token.model.toJSON().represents;
+											if (!charIdMaybe) return doRoll();
+											const charMaybe = d20.Campaign.characters.get(charIdMaybe);
+											if (charMaybe) {
+												const atbs = charMaybe.attribs.toJSON();
+												const npcAtbMaybe = atbs.find(it => it.name === "npc");
+
+												if (npcAtbMaybe && npcAtbMaybe.current == 1) {
+													const npcClean = `npc_${clean}`;
+													const bonusMaybe = atbs.find(it => it.name === npcClean);
+													if (bonusMaybe) return doRoll(npcClean);
+													else return doRoll();
+												} else {
+													const pcClean = `${clean}_bonus`;
+													const bonusMaybe = atbs.find(it => it.name === pcClean);
+													if (bonusMaybe) return doRoll(pcClean);
+													else return doRoll();
+												}
+											} else return doRoll();
+										} else return doRoll();
+									} catch (x) {
+										console.error(x);
+										return doRoll();
+									}
+								},
+								options
+							);
+						} else if ("forward-one" === e) {
+							d20plus.engine.forwardOneLayer(n);
+							i();
+						} else if ("back-one" === e) {
+							d20plus.engine.backwardOneLayer(n);
+							i();
+						} else if ("rollertokenresize" === e) {
+							resizeToken();
+							i();
+						} else if ("paste-image" === e) {
+							const mousePos = [...d20.engine.mousePos];
+							const pageId = d20.Campaign.activePage().id;
+							const layer = window.currentEditingLayer;
+
+							const url = window.prompt("Enter a URL", "https://example.com/pic.png");
+
+							if(!url) {
+								i();
+								return;
+							}
+
+
+							const img = new Image();
+							img.onload = () => {
+								const toCreate = {
+									left: mousePos[0],
+									top: mousePos[1],
+									width: img.width,
+									height: img.height,
+									z_index: 0,
+									imgsrc: url,
+									rotation: 0,
+									type: "image",
+									page_id: pageId,
+									layer,
+									id: d20plus.ut.generateRowId()
+								};
+
+								const created = d20.Campaign.activePage().thegraphics.create(toCreate);
+								created.save();
+							};
+							img.onerror = (...err) => {
+								alert("Could not load image! See the console for more information.");
+								console.error(...err);
+							};
+							img.src = url;
+							i();
+						} else if ("copy-tokenid" === e) {
+							const sel = d20.engine.selected();
+							window.prompt("Copy to clipboard: Ctrl+C, Enter", sel[0].model.id);
+							i();
+						}
+						// END MOD
+						return !1
+					}
+				}),
+				!1
+		};
+		// END ROLL20 CODE
+
+		function getRollableTokenUpdate (imgUrl, curSide) {
+			const m = /\?roll20_token_size=(.*)/.exec(imgUrl);
+			const toSave = {
+				currentSide: curSide,
+				imgsrc: imgUrl
+			};
+			if (m) {
+				toSave.width = 70 * Number(m[1]);
+				toSave.height = 70 * Number(m[1])
+			}
+			return toSave;
+		}
+
+		function resizeToken () {
+			const sel = d20.engine.selected();
+
+			const options = [["Tiny", 0.5], ["Small", 1], ["Medium", 1], ["Large", 2], ["Huge", 3], ["Gargantuan", 4], ["Colossal", 5]].map(it => `<option value='${it[1]}'>${it[0]}</option>`);
+			const dialog = $(`<div><p style='font-size: 1.15em;'><strong>${d20.utils.strip_tags("Select Size")}:</strong> <select style='width: 150px; margin-left: 5px;'>${options.join("")}</select></p></div>`);
+			dialog.dialog({
+				title: "New Size",
+				beforeClose: function () {
+					return false;
+				},
+				buttons: {
+					Submit: function () {
+						const size = dialog.find("select").val();
+						d20.engine.unselect();
+						sel.forEach(it => {
+							const nxtSize = size * 70;
+							const sides = it.model.get("sides");
+							if (sides) {
+								const ueSides = unescape(sides);
+								const cur = it.model.get("currentSide");
+								const split = ueSides.split("|");
+								if (split[cur].includes("roll20_token_size")) {
+									split[cur] = split[cur].replace(/(\?roll20_token_size=).*/, `$1${size}`);
+								} else {
+									split[cur] += `?roll20_token_size=${size}`;
+								}
+								const toSaveSides = split.map(it => escape(it)).join("|");
+								const toSave = {
+									sides: toSaveSides,
+									width: nxtSize,
+									height: nxtSize
+								};
+								console.log(`Updating token:`, toSave);
+								it.model.save(toSave);
+							} else {
+								console.warn("Token had no side data!")
+							}
+						});
+						dialog.off();
+						dialog.dialog("destroy").remove();
+						d20.textchat.$textarea.focus();
+					},
+					Cancel: function () {
+						dialog.off();
+						dialog.dialog("destroy").remove();
+					}
+				}
+			});
+		}
+
+		d20.token_editor.showContextMenu = r;
+		d20.token_editor.closeContextMenu = i;
+		$(`#editor-wrapper`).on("click", d20.token_editor.closeContextMenu);
+	};
+
+	d20plus.engine._getSelectedToMove = () => {
+		const n = [];
+		for (var l = d20.engine.selected(), c = 0; c < l.length; c++)
+			n.push(l[c]);
+	};
+
+	d20plus.engine.forwardOneLayer = (n) => {
+		d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
+			_.each(n, function (e) {
+				d20.engine.canvas.bringForward(e)
+			}),
+			d20.Campaign.activePage().debounced_recordZIndexes()
+	};
+
+	d20plus.engine.backwardOneLayer = (n) => {
+		d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
+			_.each(n, function (e) {
+				d20.engine.canvas.sendBackwards(e)
+			}),
+			d20.Campaign.activePage().debounced_recordZIndexes()
+	};
+
+	d20plus.engine._tempTopRenderLines = {}, // format: {x: ..., y: ..., to_x: ..., to_y: ..., ticks: ..., offset: ...}
+	// previously "enhanceSnap"
+	d20plus.engine.enhanceMouseDown = () => {
+		/**
+		 * Dumb variable names copy-pasted from uglified code
+		 * @param c x co-ord
+		 * @param u y c-ord
+		 * @returns {*[]} 2-len array; [0] = x and [1] = y
+		 */
+		function getClosestHexPoint (c, u) {
+			function getEuclidDist (x1, y1, x2, y2) {
+				return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+			}
+
+			const hx = d20.canvas_overlay.activeHexGrid.GetHexAt({
+				X: c,
+				Y: u
+			});
+
+			let minDist = 1000000;
+			let minPoint = [c, u];
+
+			function checkDist(x1, y1) {
+				const dist = getEuclidDist(x1, y1, c, u);
+				if (dist < minDist) {
+					minDist =  dist;
+					minPoint = [x1, y1];
+				}
+			}
+			hx.Points.forEach(pt => {
+				checkDist(pt.X, pt.Y);
+			});
+			checkDist(hx.MidPoint.X, hx.MidPoint.Y);
+
+			return minPoint;
+		}
+
+		// BEGIN ROLL20 CODE
+		const R = function(e) {
+			//BEGIN MOD
+			var t = d20.engine.canvas;
+			var a = $("#editor-wrapper");
+			// END MOD
+			var n, o;
+			if (d20.tddice && d20.tddice.handleInteraction && d20.tddice.handleInteraction(),
+				e.touches) {
+				if ("pan" == d20.engine.mode)
+					return;
+				e.touches.length > 1 && (C = d20.engine.mode,
+					d20.engine.mode = "pan",
+					d20.engine.leftMouseIsDown = !0),
+					d20.engine.lastTouchStarted = (new Date).getTime(),
+					n = e.touches[0].pageX,
+					o = e.touches[0].pageY,
+					e.preventDefault()
+			} else
+				n = e.pageX,
+					o = e.pageY;
+			for (var r = d20.engine.showLastPaths.length; r--;)
+				"selected" == d20.engine.showLastPaths[r].type && d20.engine.showLastPaths.splice(r, 1);
+			d20.engine.handleMetaKeys(e),
+			"select" != d20.engine.mode && "path" != d20.engine.mode || t.__onMouseDown(e),
+			(0 === e.button || e.touches && 1 == e.touches.length) && (d20.engine.leftMouseIsDown = !0),
+			2 === e.button && (d20.engine.rightMouseIsDown = !0);
+			var s = Math.floor(n / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0] / d20.engine.canvasZoom)
+				,
+				l = Math.floor(o / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1] / d20.engine.canvasZoom);
+			if (d20.engine.lastMousePos = [s, l],
+				d20.engine.mousePos = [s, l],
+			!d20.engine.leftMouseIsDown || "fog-reveal" != d20.engine.mode && "fog-hide" != d20.engine.mode && "gridalign" != d20.engine.mode) {
+				if (d20.engine.leftMouseIsDown && "fog-polygonreveal" == d20.engine.mode) {
+					// BEGIN MOD
+					var c = s;
+					var u = l;
+
+					if (0 != d20.engine.snapTo && (e.shiftKey && !d20.Campaign.activePage().get("adv_fow_enabled") || !e.shiftKey && d20.Campaign.activePage().get("adv_fow_enabled"))) {
+						if ("square" == d20.Campaign.activePage().get("grid_type")) {
+							c = d20.engine.snapToIncrement(c, d20.engine.snapTo);
+							u = d20.engine.snapToIncrement(u, d20.engine.snapTo);
+						} else {
+							const minPoint = getClosestHexPoint(c, u);
+							c = minPoint[0];
+							u = minPoint[1];
+						}
+					}
+
+					if (d20.engine.fog.points.length > 0 && Math.abs(d20.engine.fog.points[0][0] - c) + Math.abs(d20.engine.fog.points[0][1] - u) < 15) {
+						d20.engine.fog.points.push([d20.engine.fog.points[0][0], d20.engine.fog.points[0][1]]);
+						d20.engine.finishPolygonReveal();
+					} else {
+						d20.engine.fog.points.push([c, u]);
+					}
+					d20.engine.drawOverlays();
+					// END MOD
+				} else if (d20.engine.leftMouseIsDown && "measure" == d20.engine.mode)
+					if (2 === e.button)
+						d20.engine.addWaypoint(e);
+					else {
+						d20.engine.measure.sticky && d20.engine.endMeasure(),
+							d20.engine.measure.down[0] = s,
+							d20.engine.measure.down[1] = l,
+							d20.engine.measure.sticky = e.shiftKey;
+						let t = d20.Campaign.activePage().get("grid_type")
+							, n = "snap_center" === d20.engine.ruler_snapping && !e.altKey;
+						if (n |= "no_snap" === d20.engine.ruler_snapping && e.altKey,
+							n &= 0 !== d20.engine.snapTo)
+							if ("square" === t)
+								d20.engine.measure.down[1] = d20.engine.snapToIncrement(d20.engine.measure.down[1] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2),
+									d20.engine.measure.down[0] = d20.engine.snapToIncrement(d20.engine.measure.down[0] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2);
+							else {
+								var d = d20.canvas_overlay.activeHexGrid.GetHexAt({
+									X: d20.engine.measure.down[0],
+									Y: d20.engine.measure.down[1]
+								});
+								d20.engine.measure.down[1] = d.MidPoint.Y,
+									d20.engine.measure.down[0] = d.MidPoint.X
+							}
+						else if (0 === d20.engine.snapTo || "snap_corner" !== d20.engine.ruler_snapping || e.altKey)
+							d20.engine.measure.flags |= 1;
+						else {
+							if ("square" === t)
+								d20.engine.measure.down[0] = d20.engine.snapToIncrement(d20.engine.measure.down[0], d20.engine.snapTo),
+									d20.engine.measure.down[1] = d20.engine.snapToIncrement(d20.engine.measure.down[1], d20.engine.snapTo);
+							else {
+								let e = d20.engine.snapToHexCorner([d20.engine.measure.down[0], d20.engine.measure.down[1]]);
+								e && (d20.engine.measure.down[0] = e[0],
+									d20.engine.measure.down[1] = e[1])
+							}
+							d20.engine.measure.flags |= 1
+						}
+					}
+				else if (d20.engine.leftMouseIsDown && "fxtools" == d20.engine.mode)
+					d20.engine.fx.current || (d20.engine.fx.current = d20.fx.handleClick(s, l));
+				else if (d20.engine.leftMouseIsDown && "text" == d20.engine.mode) {
+					var h = {
+						fontFamily: $("#font-family").val(),
+						fontSize: $("#font-size").val(),
+						fill: $("#font-color").val(),
+						text: "",
+						left: s,
+						top: l
+					}
+						, p = d20.Campaign.activePage().addText(h);
+					_.defer(function () {
+						d20.engine.editText(p.view.graphic, h.top, h.left),
+							setTimeout(function () {
+								$(".texteditor").focus()
+							}, 300)
+					})
+				} else if (d20.engine.leftMouseIsDown && "rect" == d20.engine.mode) {
+					var f = parseInt($("#path_width").val(), 10)
+						, g = d20.engine.drawshape.shape = {
+						strokewidth: f,
+						x: 0,
+						y: 0,
+						width: 10,
+						height: 10,
+						type: e.altKey ? "circle" : "rect"
+					};
+					c = s,
+						u = l;
+					0 != d20.engine.snapTo && e.shiftKey && (c = d20.engine.snapToIncrement(c, d20.engine.snapTo),
+						u = d20.engine.snapToIncrement(u, d20.engine.snapTo)),
+						g.x = c,
+						g.y = u,
+						g.fill = $("#path_fillcolor").val(),
+						g.stroke = $("#path_strokecolor").val(),
+						d20.engine.drawshape.start = [n + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0], o + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1]],
+						d20.engine.renderTop()
+				} else if (d20.engine.leftMouseIsDown && "polygon" == d20.engine.mode) {
+					if (d20.engine.drawshape.shape)
+						g = d20.engine.drawshape.shape;
+					else {
+						f = parseInt($("#path_width").val(), 10);
+						(g = d20.engine.drawshape.shape = {
+							strokewidth: f,
+							points: [],
+							type: "polygon"
+						}).fill = $("#path_fillcolor").val(),
+							g.stroke = $("#path_strokecolor").val()
+					}
+					// BEGIN MOD
+					var c = s;
+					var u = l;
+
+					if (0 != d20.engine.snapTo && e.shiftKey) {
+						if ("square" == d20.Campaign.activePage().get("grid_type")) {
+							c = d20.engine.snapToIncrement(c, d20.engine.snapTo);
+							u = d20.engine.snapToIncrement(u, d20.engine.snapTo);
+						} else {
+							const minPoint = getClosestHexPoint(c, u);
+							c = minPoint[0];
+							u = minPoint[1];
+						}
+					}
+
+					if (g.points.length > 0 && Math.abs(g.points[0][0] - c) + Math.abs(g.points[0][1] - u) < 15) {
+						g.points.push([g.points[0][0], g.points[0][1]]);
+						if (g.points.length > 2) {
+							g.points.push([g.points[1][0], g.points[1][1]]);
+						}
+						d20.engine.finishCurrentPolygon();
+					} else {
+						g.points.push([c, u]);
+					}
+
+					d20.engine.debounced_renderTop();
+					// END MOD
+				} else if (d20.engine.leftMouseIsDown && "targeting" === d20.engine.mode) {
+					var m = d20.engine.canvas.findTarget(e, !0, !0);
+					return void (m !== undefined && "image" === m.type && m.model && d20.engine.nextTargetCallback(m))
+				}
+				// BEGIN MOD
+				else if (d20.engine.leftMouseIsDown && "line_splitter" === d20.engine.mode) {
+					const lastPoint = {x: d20.engine.lastMousePos[0], y: d20.engine.lastMousePos[1]};
+					(d20.engine.canvas._objects || []).forEach(o => {
+						if (o.type === "path" && o.containsPoint(lastPoint)) {
+							const asObj = o.toObject();
+							const anyCurves = asObj.path.filter(it => it instanceof Array && it.length > 0  && it[0] === "C");
+							if (!anyCurves.length) {
+								// PathMath expects these
+								o.model.set("_pageid", d20.Campaign.activePage().get("id"));
+								o.model.set("_path", JSON.stringify(o.path));
+
+								console.log("SPLITTING PATH: ", o.model.toJSON());
+								const mainPath = o.model;
+
+								// BEGIN PathSplitter CODE
+								let mainSegments = PathMath.toSegments(mainPath);
+								// BEGIN MOD
+								// fake a tiny diagonal line
+								const SLICE_LEN = 10;
+								const slicePoint1 = [lastPoint.x + (SLICE_LEN / 2), lastPoint.y + (SLICE_LEN / 2), 1];
+								const slicePoint2 = [lastPoint.x - (SLICE_LEN / 2), lastPoint.y - (SLICE_LEN / 2), 1];
+								const nuId = d20plus.ut.generateRowId();
+								d20plus.engine._tempTopRenderLines[nuId] = {
+									ticks: 2,
+									x: slicePoint1[0],
+									y: slicePoint1[1],
+									to_x: slicePoint2[0],
+									to_y: slicePoint2[1],
+									offset: [...d20.engine.currentCanvasOffset]
+								};
+								setTimeout(() => {
+									d20.engine.debounced_renderTop();
+								}, 1);
+								let splitSegments = [
+									[slicePoint1, slicePoint2]
+								];
+								// END MOD
+								let segmentPaths = _getSplitSegmentPaths(mainSegments, splitSegments);
+
+								// (function moved into this scope)
+								function _getSplitSegmentPaths(mainSegments, splitSegments) {
+									let resultSegPaths = [];
+									let curPathSegs = [];
+
+									_.each(mainSegments, seg1 => {
+
+										// Find the points of intersection and their parametric coefficients.
+										let intersections = [];
+										_.each(splitSegments, seg2 => {
+											let i = PathMath.segmentIntersection(seg1, seg2);
+											if(i) intersections.push(i);
+										});
+
+										if(intersections.length > 0) {
+											// Sort the intersections in the order that they appear along seg1.
+											intersections.sort((a, b) => {
+												return a[1] - b[1];
+											});
+
+											let lastPt = seg1[0];
+											_.each(intersections, i => {
+												// Complete the current segment path.
+												curPathSegs.push([lastPt, i[0]]);
+												resultSegPaths.push(curPathSegs);
+
+												// Start a new segment path.
+												curPathSegs = [];
+												lastPt = i[0];
+											});
+											curPathSegs.push([lastPt, seg1[1]]);
+										}
+										else {
+											curPathSegs.push(seg1);
+										}
+									});
+									resultSegPaths.push(curPathSegs);
+
+									return resultSegPaths;
+								};
+								// (end function moved into this scope)
+
+								// Convert the list of segment paths into paths.
+								let _pageid = mainPath.get('_pageid');
+								let controlledby = mainPath.get('controlledby');
+								let fill = mainPath.get('fill');
+								let layer = mainPath.get('layer');
+								let stroke = mainPath.get('stroke');
+								let stroke_width = mainPath.get('stroke_width');
+
+								let results = [];
+								_.each(segmentPaths, segments => {
+									// BEGIN MOD
+									if (!segments) {
+										d20plus.chatLog(`A path had no segments! This is probably a bug. Please report it.`);
+										return;
+									}
+									// END MOD
+
+									let pathData = PathMath.segmentsToPath(segments);
+									_.extend(pathData, {
+										_pageid,
+										controlledby,
+										fill,
+										layer,
+										stroke,
+										stroke_width
+									});
+									let path = createObj('path', pathData);
+									results.push(path);
+								});
+
+								// Remove the original path and the splitPath.
+								// BEGIN MOD
+								mainPath.destroy();
+								// END MOD
+								// END PathSplitter CODE
+							}
+						}
+					});
+				}
+				// END MOD
+			} else
+				d20.engine.fog.down[0] = s,
+					d20.engine.fog.down[1] = l,
+				0 != d20.engine.snapTo && "square" == d20.Campaign.activePage().get("grid_type") && ("gridalign" == d20.engine.mode ? e.shiftKey && (d20.engine.fog.down[0] = d20.engine.snapToIncrement(d20.engine.fog.down[0], d20.engine.snapTo),
+					d20.engine.fog.down[1] = d20.engine.snapToIncrement(d20.engine.fog.down[1], d20.engine.snapTo)) : (e.shiftKey && !d20.Campaign.activePage().get("adv_fow_enabled") || !e.shiftKey && d20.Campaign.activePage().get("adv_fow_enabled")) && (d20.engine.fog.down[0] = d20.engine.snapToIncrement(d20.engine.fog.down[0], d20.engine.snapTo),
+					d20.engine.fog.down[1] = d20.engine.snapToIncrement(d20.engine.fog.down[1], d20.engine.snapTo)));
+			if (window.currentPlayer && d20.engine.leftMouseIsDown && "select" == d20.engine.mode) {
+				if (2 === e.button && d20.engine.addWaypoint(e),
+				d20.engine.pings[window.currentPlayer.id] && d20.engine.pings[window.currentPlayer.id].radius > 20)
+					return;
+				var y = {
+					left: s,
+					top: l,
+					radius: -5,
+					player: window.currentPlayer.id,
+					pageid: d20.Campaign.activePage().id,
+					currentLayer: window.currentEditingLayer
+				};
+				window.is_gm && e.shiftKey && (y.scrollto = !0),
+					d20.engine.pings[window.currentPlayer.id] = y,
+					d20.engine.pinging = {
+						downx: n,
+						downy: o
+					},
+					d20.engine.renderTop()
+			}
+			d20.engine.rightMouseIsDown && ("select" == d20.engine.mode || "path" == d20.engine.mode || "text" == d20.engine.mode) || d20.engine.leftMouseIsDown && "pan" == d20.engine.mode ? (d20.engine.pan.beginPos = [a.scrollLeft(), a.scrollTop()],
+				d20.engine.pan.panXY = [n, o],
+				d20.engine.pan.panning = !0) : d20.engine.pan.panning = !1,
+			2 === e.button && !d20.engine.leftMouseIsDown && d20.engine.measurements[window.currentPlayer.id] && d20.engine.measurements[window.currentPlayer.id].sticky && (d20.engine.endMeasure(),
+				d20.engine.announceEndMeasure({
+					player: window.currentPlayer.id
+				})),
+				// BEGIN MOD
+			$(`#upperCanvas`).hasClass("hasfocus") || $(`#upperCanvas`).focus()
+			// END MOD
+		};
+		// END ROLL20 CODE
+
+		if (UPPER_CANVAS_MOUSEDOWN_LIST.length) {
+			UPPER_CANVAS_MOUSEDOWN = (UPPER_CANVAS_MOUSEDOWN_LIST.find(it => it.on === d20.engine.uppercanvas) || {}).listener;
+		}
+
+		if (UPPER_CANVAS_MOUSEDOWN) {
+			d20plus.ut.log("Enhancing hex snap");
+			d20.engine.uppercanvas.removeEventListener("mousedown", UPPER_CANVAS_MOUSEDOWN);
+			d20.engine.uppercanvas.addEventListener("mousedown", R);
+		}
+
+		// add half-grid snap
+		d20.engine.snapToIncrement = function(e, t) {
+			if (d20plus.cfg.getCfgVal("canvas", "halfGridSnap")) {
+				t = t / 2;
+			}
+			return t * Math.round(e / t);
+		}
+	};
+
+	d20plus.engine.enhanceMouseUp = () => { // P
+
+	};
+
+	d20plus.engine.enhanceMouseMove = () => {
+		// needs to be called after `enhanceMeasureTool()`
+		const $selMeasureMode = $(`#measure_mode`);
+		const $selRadMode = $(`#measure_mode_sel_2`);
+		const $iptConeWidth = $(`#measure_mode_ipt_3`);
+		const $selConeMode = $(`#measure_mode_sel_3`);
+		const $selBoxMode = $(`#measure_mode_sel_4`);
+		const $selLineMode = $(`#measure_mode_sel_5`);
+		const $iptLineWidth = $(`#measure_mode_ipt_5`);
+
+		// BEGIN ROLL20 CODE
+		var x = function(e) {
+			e.type = "measuring",
+				e.time = (new Date).getTime(),
+				d20.textchat.sendShout(e)
+		}
+			, k = _.throttle(x, 200)
+			, E = function(e) {
+			k(e),
+			d20.tutorial && d20.tutorial.active && $(document.body).trigger("measure"),
+				d20.engine.receiveMeasureUpdate(e)
+		};
+		// END ROLL20 CODE
+
+		// add missing vars
+		var t = d20.engine.canvas;
+		var a = $("#editor-wrapper");
+
+		// BEGIN ROLL20 CODE
+		const A = function(e) {
+			var n, i;
+			if (e.changedTouches ? ((e.changedTouches.length > 1 || "pan" == d20.engine.mode) && (delete d20.engine.pings[window.currentPlayer.id],
+				d20.engine.pinging = !1),
+				e.preventDefault(),
+				n = e.changedTouches[0].pageX,
+				i = e.changedTouches[0].pageY) : (n = e.pageX,
+				i = e.pageY),
+			"select" != d20.engine.mode && "path" != d20.engine.mode && "targeting" != d20.engine.mode || t.__onMouseMove(e),
+			d20.engine.leftMouseIsDown || d20.engine.rightMouseIsDown) {
+				var o = Math.floor(n / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0] / d20.engine.canvasZoom)
+					, r = Math.floor(i / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1] / d20.engine.canvasZoom);
+				if (d20.engine.mousePos = [o, r],
+				!d20.engine.leftMouseIsDown || "fog-reveal" != d20.engine.mode && "fog-hide" != d20.engine.mode && "gridalign" != d20.engine.mode) {
+					if (d20.engine.leftMouseIsDown && "measure" == d20.engine.mode && d20.engine.measure.down[0] !== undefined && d20.engine.measure.down[1] !== undefined) {
+						d20.engine.measure.down[2] = o,
+							d20.engine.measure.down[3] = r,
+							d20.engine.measure.sticky |= e.shiftKey;
+						let t = d20.Campaign.activePage().get("grid_type")
+							, n = "snap_corner" === d20.engine.ruler_snapping && !e.altKey && 0 !== d20.engine.snapTo
+							, i = "snap_center" === d20.engine.ruler_snapping && !e.altKey;
+						if (i |= "no_snap" === d20.engine.ruler_snapping && e.altKey,
+							i &= 0 !== d20.engine.snapTo) {
+							if ("square" === t)
+								d20.engine.measure.down[2] = d20.engine.snapToIncrement(d20.engine.measure.down[2] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2),
+									d20.engine.measure.down[3] = d20.engine.snapToIncrement(d20.engine.measure.down[3] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2);
+							else {
+								let e = d20.canvas_overlay.activeHexGrid.GetHexAt({
+									X: d20.engine.measure.down[2],
+									Y: d20.engine.measure.down[3]
+								});
+								e && (d20.engine.measure.down[3] = e.MidPoint.Y,
+									d20.engine.measure.down[2] = e.MidPoint.X)
+							}
+							d20.engine.measure.flags &= -3
+						} else if (n) {
+							if ("square" === t)
+								d20.engine.measure.down[2] = d20.engine.snapToIncrement(d20.engine.measure.down[2], d20.engine.snapTo),
+									d20.engine.measure.down[3] = d20.engine.snapToIncrement(d20.engine.measure.down[3], d20.engine.snapTo);
+							else {
+								let e = d20.engine.snapToHexCorner([d20.engine.measure.down[2], d20.engine.measure.down[3]]);
+								e && (d20.engine.measure.down[2] = e[0],
+									d20.engine.measure.down[3] = e[1])
+							}
+							d20.engine.measure.flags |= 2
+						} else
+							d20.engine.measure.flags |= 2;
+						var s = {
+							x: d20.engine.measure.down[0],
+							y: d20.engine.measure.down[1],
+							to_x: d20.engine.measure.down[2],
+							to_y: d20.engine.measure.down[3],
+							player: window.currentPlayer.id,
+							pageid: d20.Campaign.activePage().id,
+							currentLayer: window.currentEditingLayer,
+							waypoints: d20.engine.measure.waypoints,
+							sticky: d20.engine.measure.sticky,
+							flags: d20.engine.measure.flags,
+							hide: d20.engine.measure.hide
+							// BEGIN MOD
+							,
+							Ve: {
+								mode: $selMeasureMode.val(),
+								radius: {
+									mode: $selRadMode.val()
+								},
+								cone: {
+									arc: $iptConeWidth.val(),
+									mode: $selConeMode.val()
+								},
+								box: {
+									mode: $selBoxMode.val(),
+								},
+								line: {
+									mode: $selLineMode.val(),
+									width: $iptLineWidth.val()
+								}
+							}
+							// END MOD
+						};
+						d20.engine.announceMeasure(s)
+					} else if (d20.engine.leftMouseIsDown && "fxtools" == d20.engine.mode) {
+						if (d20.engine.fx.current) {
+							var l = (new Date).getTime();
+							l - d20.engine.fx.lastMoveBroadcast > d20.engine.fx.MOVE_BROADCAST_FREQ ? (d20.fx.moveFx(d20.engine.fx.current, o, r),
+								d20.engine.fx.lastMoveBroadcast = l) : d20.fx.moveFx(d20.engine.fx.current, o, r, !0)
+						}
+					} else if (d20.engine.leftMouseIsDown && "rect" == d20.engine.mode) {
+						var c = (n + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0] - d20.engine.drawshape.start[0]) / d20.engine.canvasZoom
+							, u = (i + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1] - d20.engine.drawshape.start[1]) / d20.engine.canvasZoom;
+						0 != d20.engine.snapTo && e.shiftKey && (c = d20.engine.snapToIncrement(c, d20.engine.snapTo),
+							u = d20.engine.snapToIncrement(u, d20.engine.snapTo));
+						var d = d20.engine.drawshape.shape;
+						d.width = c,
+							d.height = u,
+							d20.engine.renderTop()
+					}
+				} else
+					d20.engine.fog.down[2] = o,
+						d20.engine.fog.down[3] = r,
+					0 != d20.engine.snapTo && "square" == d20.Campaign.activePage().get("grid_type") && ("gridalign" == d20.engine.mode ? e.shiftKey && (d20.engine.fog.down[2] = d20.engine.snapToIncrement(d20.engine.fog.down[2], d20.engine.snapTo),
+						d20.engine.fog.down[3] = d20.engine.snapToIncrement(d20.engine.fog.down[3], d20.engine.snapTo)) : (e.shiftKey && !d20.Campaign.activePage().get("adv_fow_enabled") || !e.shiftKey && d20.Campaign.activePage().get("adv_fow_enabled")) && (d20.engine.fog.down[2] = d20.engine.snapToIncrement(d20.engine.fog.down[2], d20.engine.snapTo),
+						d20.engine.fog.down[3] = d20.engine.snapToIncrement(d20.engine.fog.down[3], d20.engine.snapTo))),
+						d20.engine.drawOverlays();
+				if (d20.engine.pinging)
+					(c = Math.abs(d20.engine.pinging.downx - n)) + (u = Math.abs(d20.engine.pinging.downy - i)) > 10 && (delete d20.engine.pings[window.currentPlayer.id],
+						d20.engine.pinging = !1);
+				if (d20.engine.pan.panning) {
+					c = 2 * (n - d20.engine.pan.panXY[0]),
+						u = 2 * (i - d20.engine.pan.panXY[1]);
+					if (d20.engine.pan.lastPanDist += Math.abs(c) + Math.abs(u),
+					d20.engine.pan.lastPanDist < 10)
+						return;
+					var h = d20.engine.pan.beginPos[0] - c
+						, p = d20.engine.pan.beginPos[1] - u;
+					a.stop().animate({
+						scrollLeft: h,
+						scrollTop: p
+					}, {
+						duration: 1500,
+						easing: "easeOutExpo",
+						queue: !1
+					})
+				}
+			}
+		};
+		// END ROLL20 CODE
+
+		if (UPPER_CANVAS_MOUSEMOVE_LIST.length) {
+			UPPER_CANVAS_MOUSEMOVE = (UPPER_CANVAS_MOUSEMOVE_LIST.find(it => it.on === d20.engine.uppercanvas) || {}).listener;
+		}
+
+		if (UPPER_CANVAS_MOUSEMOVE) {
+			d20plus.ut.log("Enhancing mouse move");
+			d20.engine.uppercanvas.removeEventListener("mousemove", UPPER_CANVAS_MOUSEMOVE);
+			d20.engine.uppercanvas.addEventListener("mousemove", A);
+		}
+	};
+
+	d20plus.engine.addLineCutterTool = () => {
+		const $btnTextTool = $(`.choosetext`);
+
+		const $btnSplitTool = $(`<li class="choosesplitter">✂️ Line Splitter</li>`).click(() => {
+			d20plus.setMode("line_splitter");
+		});
+
+		$btnTextTool.after($btnSplitTool);
+	};
+
+	d20plus.engine._tokenHover = null;
+	d20plus.engine._drawTokenHover = () => {
+		$(`.Vetools-token-hover`).remove();
+		if (!d20plus.engine._tokenHover || !d20plus.engine._tokenHover.text) return;
+
+		const pt = d20plus.engine._tokenHover.pt;
+		const txt = unescape(d20plus.engine._tokenHover.text);
+
+		const scaleFact = (1 / d20.engine.canvasZoom);
+		const xOffset = pt.x > (d20.engine.canvasWidth / 2) ? -300 * scaleFact : 0;
+
+		$(`body`).append(`<div class="Vetools-token-hover" style="top: ${pt.y}px; left: ${pt.x + xOffset}px">${txt}</div>`);
+	};
+	d20plus.engine.addTokenHover = () => {
+		// BEGIN ROLL20 CODE
+		d20.engine.drawOverlaysTop = function(e) {
+			e.globalCompositeOperation = "lighter";
+			d20.fx.render(e);
+			e.globalCompositeOperation = "source-over";
+			d20.engine.redrawSightTokens(e);
+			d20.engine.drawShadowMovements(e);
+			d20.engine.drawMeasurements(e);
+			d20.engine.drawPings(e);
+			d20.engine.drawInProgressDrawings(e);
+
+			// BEGIN MOD
+			d20plus.engine._drawTokenHover();
+			// END MOD
+		};
+		// END ROLL20 CODE
+
+		// store data for the rendering function to access
+		d20.engine.canvas.on("mouse:move", (data, ...others) => {
+			// enable hover from GM layer -> token layer
+			let hoverTarget = data.target;
+			if (data.e && window.currentEditingLayer === "gmlayer") {
+				const cache = window.currentEditingLayer;
+				window.currentEditingLayer = "objects";
+				hoverTarget = d20.engine.canvas.findTarget(data.e, null, true);
+				window.currentEditingLayer = cache;
+			}
+
+			if (data.e.shiftKey && hoverTarget && hoverTarget.model) {
+				d20.engine.debounced_renderTop();
+				const gmNotes = hoverTarget.model.get("gmnotes");
+				const pt = d20.engine.canvas.getPointer(data.e);
+				pt.x -= d20.engine.currentCanvasOffset[0];
+				pt.y -= d20.engine.currentCanvasOffset[1];
+				d20plus.engine._tokenHover = {
+					pt: pt,
+					text: gmNotes,
+					id: hoverTarget.model.id
+				};
+			} else {
+				if (d20plus.engine._tokenHover) d20.engine.debounced_renderTop();
+				d20plus.engine._tokenHover = null;
+			}
+		})
+	};
+
+	d20plus.engine.enhanceMarkdown = () => {
+		const OUT_STRIKE = "<span style='text-decoration: line-through'>$1</span>";
+
+		// BEGIN ROLL20 CODE
+		window.Markdown.parse = function(e) {
+			{
+				var t = e
+					, n = []
+					, i = [];
+				-1 != t.indexOf("\r\n") ? "\r\n" : -1 != t.indexOf("\n") ? "\n" : ""
+			}
+			return t = t.replace(/{{{([\s\S]*?)}}}/g, function(e) {
+				return n.push(e.substring(3, e.length - 3)),
+					"{{{}}}"
+			}),
+				t = t.replace(new RegExp("<pre>([\\s\\S]*?)</pre>","gi"), function(e) {
+					return i.push(e.substring(5, e.length - 6)),
+						"<pre></pre>"
+				}),
+				// BEGIN MOD
+				t = t.replace(/~~(.*?)~~/g, OUT_STRIKE),
+				// END MOD
+				t = t.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>"),
+				t = t.replace(/\*(.*?)\*/g, "<em>$1</em>"),
+				t = t.replace(/``(.*?)``/g, "<code>$1</code>"),
+				t = t.replace(/\[([^\]]+)\]\(([^)]+(\.png|\.gif|\.jpg|\.jpeg))\)/g, '<a href="$2"><img src="$2" alt="$1" /></a>'),
+				t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>'),
+				t = t.replace(new RegExp("<pre></pre>","g"), function() {
+					return "<pre>" + i.shift() + "</pre>"
+				}),
+				t = t.replace(/{{{}}}/g, function() {
+					return n.shift()
+				})
+		}
+		// END ROLL20 CODE
+
+		// after a short delay, replace any old content in the chat
+		setTimeout(() => {
+			$(`.message`).each(function () {
+				$(this).html($(this).html().replace(/~~(.*?)~~/g, OUT_STRIKE))
+			})
+		}, 2500);
+	};
+
+	d20plus.engine.enhancePathWidths = () => {
+		const $selThicc = $(`#path_width`).css("width", "150px");
+		$selThicc.append(`
+				<option value="5">Custom 1 (5 px.)</option>
+				<option value="5">Custom 2 (5 px.)</option>
+				<option value="5">Custom 3 (5 px.)</option>
+			`);
+		const $iptThicc = $(`<input type="number" style="max-width: 50px;">`).hide();
+		const $lblPixels = $(`<label style="display: inline-flex;"> pixels</label>`).hide();
+		$selThicc.after($lblPixels).after($iptThicc);
+
+		let $selOpt = null;
+		$selThicc.on("change", () => {
+			$selOpt = $selThicc.find(`option:selected`);
+			const txt = $selOpt.text();
+			if (txt.startsWith("Custom")) {
+				const thicc = /\((.*?) px\.\)/.exec(txt)[1];
+				$lblPixels.show();
+				$iptThicc.show().val(Number(thicc));
+			} else {
+				$lblPixels.hide();
+				$iptThicc.hide();
+			}
+		});
+
+		$iptThicc.on("keyup", () => {
+			if (!$selOpt) $selOpt = $selThicc.find(`option:selected`);
+			if ($selOpt) {
+				const clean = Math.round(Math.max(1, Number($iptThicc.val())));
+				$selOpt.val(`${clean}`);
+				$selOpt.text($selOpt.text().replace(/\(\d+ px\.\)/, `(${clean} px.)`));
+				d20.engine.canvas.freeDrawingBrush.width = clean;
+			}
+		});
+	};
+
+	d20plus.engine.enhanceTransmogrifier = () => {
+		JqueryUtil.addSelectors();
+
+		$("#transmogrifier").on("click", () => {
+			setTimeout(() => {
+				const $btnAlpha = $(`#vetools-transmog-alpha`);
+				if (!$btnAlpha.length) {
+					const $prependTarget = $(`.ui-dialog-title:textEquals(Transmogrifier)`).first().parent().parent().find(`.ui-dialog-content`);
+					$(`<button id="#vetools-transmog-alpha" class="btn btn default" style="margin-bottom: 5px;">Sort Items Alphabetically</button>`).on("click", () => {
+						// coped from a bookmarklet
+						$('iframe').contents().find('.objects').each((c,e)=>{ let $e=$(e); $e.children().sort( (a,b)=>{ let name1=$(a).find(".name").text().toLowerCase(), name2=$(b).find(".name").text().toLowerCase(), comp = name1.localeCompare(name2); return comp; }) .each((i,c)=>$e.append(c)); });
+					}).prependTo($prependTarget);
+				}
+			}, 5);
+		})
+	};
+}
+
+SCRIPT_EXTENSIONS.push(d20plusUi);
+
+
+function d20plusJournal () {
+	d20plus.journal = {};
+
+	d20plus.journal.lastClickedFolderId = null;
+
+	d20plus.journal.addJournalCommands = () => {
+		// Create new Journal commands
+		// stash the folder ID of the last folder clicked
+		$("#journalfolderroot").on("contextmenu", ".dd-content", function (e) {
+			if ($(this).parent().hasClass("dd-folder")) {
+				const lastClicked = $(this).parent();
+				d20plus.journal.lastClickedFolderId = lastClicked.attr("data-globalfolderid");
+			}
+
+
+			if ($(this).parent().hasClass("character")) {
+				$(`.Vetools-make-tokenactions`).show();
+			} else {
+				$(`.Vetools-make-tokenactions`).hide();
+			}
+		});
+
+		var first = $("#journalitemmenu ul li").first();
+		// "Make Tokenactions" option
+		first.after(`<li class="Vetools-make-tokenactions" data-action-type="additem">Make Tokenactions</li>`);
+		$("#journalitemmenu ul").on(window.mousedowntype, "li[data-action-type=additem]", function () {
+			var id = $currentItemTarget.attr("data-itemid");
+			var character = d20.Campaign.characters.get(id);
+			d20plus.ut.log("Making Token Actions..");
+			if (character) {
+				var npc = character.attribs.find(function (a) {
+					return a.get("name").toLowerCase() == "npc";
+				});
+				var isNPC = npc ? parseInt(npc.get("current")) : 0;
+				if (isNPC) {
+					//Npc specific tokenactions
+					character.abilities.create({
+						name: "Perception",
+						istokenaction: true,
+						action: d20plus.actionMacroPerception
+					});
+					character.abilities.create({
+						name: "DR/Immunities",
+						istokenaction: true,
+						action: d20plus.actionMacroDrImmunities
+					});
+					character.abilities.create({
+						name: "Stats",
+						istokenaction: true,
+						action: d20plus.actionMacroStats
+					});
+					character.abilities.create({
+						name: "Saves",
+						istokenaction: true,
+						action: d20plus.actionMacroSaves
+					});
+					character.abilities.create({
+						name: "Skill-Check",
+						istokenaction: true,
+						action: d20plus.actionMacroSkillCheck
+					});
+					character.abilities.create({
+						name: "Ability-Check",
+						istokenaction: true,
+						action: d20plus.actionMacroAbilityCheck
+					});
+				} else {
+					//player specific tokenactions
+					//@{selected|repeating_attack_$0_atkname}
+					character.abilities.create({
+						name: "Attack 1",
+						istokenaction: true,
+						action: "%{selected|repeating_attack_$0_attack}"
+					});
+					character.abilities.create({
+						name: "Attack 2",
+						istokenaction: true,
+						action: "%{selected|repeating_attack_$1_attack}"
+					});
+					character.abilities.create({
+						name: "Attack 3",
+						istokenaction: true,
+						action: "%{selected|repeating_attack_$2_attack}"
+					});
+					character.abilities.create({
+						name: "Tool 1",
+						istokenaction: true,
+						action: "%{selected|repeating_tool_$0_tool}"
+					});
+					//" + character.get("name") + "
+					character.abilities.create({
+						name: "Whisper GM",
+						istokenaction: true,
+						action: "/w gm ?{Message to whisper the GM?}"
+					});
+					character.abilities.create({
+						name: "Favorite Spells",
+						istokenaction: true,
+						action: "/w @{character_name} &{template:npcaction} {{rname=Favorite Spells}} {{description=Favorite Spells are the first spells in each level of your spellbook.\n\r[Cantrip](~selected|repeating_spell-cantrip_$0_spell)\n[1st Level](~selected|repeating_spell-1_$0_spell)\n\r[2nd Level](~selected|repeating_spell-2_$0_spell)\n\r[3rd Level](~selected|repeating_spell-3_$0_spell)\n\r[4th Level](~selected|repeating_spell-4_$0_spell)\n\r[5th Level](~selected|repeating_spell-5_$0_spell)}}"
+					});
+					character.abilities.create({
+						name: "Dual Attack",
+						istokenaction: false,
+						action: "%{selected|repeating_attack_$0_attack}\n\r%{selected|repeating_attack_$0_attack}"
+					});
+					character.abilities.create({
+						name: "Saves",
+						istokenaction: true,
+						action: "@{selected|wtype}&{template:simple} @{selected|rtype}?{Save|Strength, +@{selected|strength_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Strength Save&#125;&#125 {{mod=@{selected|strength_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|strength_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Dexterity, +@{selected|dexterity_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Dexterity Save&#125;&#125 {{mod=@{selected|dexterity_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|dexterity_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Constitution, +@{selected|constitution_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Constitution Save&#125;&#125 {{mod=@{selected|constitution_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|constitution_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Intelligence, +@{selected|intelligence_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Intelligence Save&#125;&#125 {{mod=@{selected|intelligence_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|intelligence_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Wisdom, +@{selected|wisdom_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Wisdom Save&#125;&#125 {{mod=@{selected|wisdom_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|wisdom_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Charisma, +@{selected|charisma_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Charisma Save&#125;&#125 {{mod=@{selected|charisma_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|charisma_save_bonus}@{selected|pbd_safe}]]&#125;&#125;}@{selected|global_save_mod}@{selected|charname_output"
+					});
+					character.abilities.create({
+						name: "Skill-Check",
+						istokenaction: true,
+						action: "@{selected|wtype}&{template:simple} @{selected|rtype}?{Ability|Acrobatics, +@{selected|acrobatics_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Acrobatics&#125;&#125; {{mod=@{selected|acrobatics_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|acrobatics_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Animal Handling, +@{selected|animal_handling_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Animal Handling&#125;&#125; {{mod=@{selected|animal_handling_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|animal_handling_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Arcana, +@{selected|arcana_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Arcana&#125;&#125; {{mod=@{selected|arcana_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|arcana_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Athletics, +@{selected|athletics_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Athletics&#125;&#125; {{mod=@{selected|athletics_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|athletics_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Deception, +@{selected|deception_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Deception&#125;&#125; {{mod=@{selected|deception_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|deception_bonus}@{selected|pbd_safe} ]]&#125;&#125; |History, +@{selected|history_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=History&#125;&#125; {{mod=@{selected|history_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|history_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Insight, +@{selected|insight_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Insight&#125;&#125; {{mod=@{selected|insight_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|insight_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Intimidation, +@{selected|intimidation_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Intimidation&#125;&#125; {{mod=@{selected|intimidation_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|intimidation_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Investigation, +@{selected|investigation_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Investigation&#125;&#125; {{mod=@{selected|investigation_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|investigation_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Medicine, +@{selected|medicine_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Medicine&#125;&#125; {{mod=@{selected|medicine_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|medicine_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Nature, +@{selected|nature_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Nature&#125;&#125; {{mod=@{selected|nature_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|nature_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Perception, +@{selected|perception_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Perception&#125;&#125; {{mod=@{selected|perception_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|perception_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Performance, +@{selected|performance_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Performance&#125;&#125; {{mod=@{selected|performance_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|performance_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Persuasion, +@{selected|persuasion_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Persuasion&#125;&#125; {{mod=@{selected|persuasion_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|persuasion_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Religion, +@{selected|religion_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Religion&#125;&#125; {{mod=@{selected|religion_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|religion_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Sleight of Hand, +@{selected|sleight_of_hand_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Sleight of Hand&#125;&#125; {{mod=@{selected|sleight_of_hand_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|sleight_of_hand_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Stealth, +@{selected|stealth_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Stealth&#125;&#125; {{mod=@{selected|stealth_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|stealth_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Survival, +@{selected|survival_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Survival&#125;&#125; {{mod=@{selected|survival_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|survival_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Strength, +@{selected|strength_mod}@{selected|jack_attr}[STR]]]&#125;&#125; {{rname=Strength&#125;&#125; {{mod=@{selected|strength_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|strength_mod}@{selected|jack_attr}[STR]]]&#125;&#125; |Dexterity, +@{selected|dexterity_mod}@{selected|jack_attr}[DEX]]]&#125;&#125; {{rname=Dexterity&#125;&#125; {{mod=@{selected|dexterity_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|dexterity_mod}@{selected|jack_attr}[DEX]]]&#125;&#125; |Constitution, +@{selected|constitution_mod}@{selected|jack_attr}[CON]]]&#125;&#125; {{rname=Constitution&#125;&#125; {{mod=@{selected|constitution_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|constitution_mod}@{selected|jack_attr}[CON]]]&#125;&#125; |Intelligence, +@{selected|intelligence_mod}@{selected|jack_attr}[INT]]]&#125;&#125; {{rname=Intelligence&#125;&#125; {{mod=@{selected|intelligence_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|intelligence_mod}@{selected|jack_attr}[INT]]]&#125;&#125; |Wisdom, +@{selected|wisdom_mod}@{selected|jack_attr}[WIS]]]&#125;&#125; {{rname=Wisdom&#125;&#125; {{mod=@{selected|wisdom_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|wisdom_mod}@{selected|jack_attr}[WIS]]]&#125;&#125; |Charisma, +@{selected|charisma_mod}@{selected|jack_attr}[CHA]]]&#125;&#125; {{rname=Charisma&#125;&#125; {{mod=@{selected|charisma_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|charisma_mod}@{selected|jack_attr}[CHA]]]&#125;&#125; } @{selected|global_skill_mod} @{selected|charname_output}"
+					});
+				}
+				//for everyone
+				character.abilities.create({
+					name: "Initiative",
+					istokenaction: true,
+					action: d20plus.actionMacroInit
+				});
+			}
+		});
+
+		// "Duplicate" option
+		first.after("<li data-action-type=\"cloneitem\">Duplicate</li>");
+		first.after("<li style=\"height: 10px;\">&nbsp;</li>");
+		$("#journalitemmenu ul").on(window.mousedowntype, "li[data-action-type=cloneitem]", function () {
+			var id = $currentItemTarget.attr("data-itemid");
+			var character = d20.Campaign.characters.get(id);
+			var handout = d20.Campaign.handouts.get(id);
+			d20plus.ut.log("Duplicating..");
+			if (character) {
+				character.editview.render();
+				character.editview.$el.find("button.duplicate").trigger("click");
+			}
+			if (handout) {
+				handout.view.render();
+				var json = handout.toJSON();
+				delete json.id;
+				json.name = "Copy of " + json.name;
+				handout.collection.create(json, {
+					success: function (h) {
+						handout._getLatestBlob("gmnotes", function (gmnotes) {
+							h.updateBlobs({gmnotes: gmnotes});
+						});
+						handout._getLatestBlob("notes", function (notes) {
+							h.updateBlobs({notes: notes});
+						});
+					}
+				});
+			}
+		});
+
+		// New command on FOLDERS
+		var last = $("#journalmenu ul li").last();
+		last.after("<li style=\"background-color: #FA5050; color: white;\" data-action-type=\"fulldelete\">Delete Folder + Contents</li>");
+		$("#journalmenu ul").on(window.mousedowntype, "li[data-action-type=fulldelete]", function () {
+			d20plus.importer.recursiveRemoveDirById(d20plus.journal.lastClickedFolderId, true);
+			d20plus.journal.lastClickedFolderId = null;
+			$("#journalmenu").hide();
+		});
+	};
+}
+
+SCRIPT_EXTENSIONS.push(d20plusJournal);
+
+
+function baseCss () {
+	d20plus.css = {};
+
+	d20plus.css.baseCssRules = [
+		// generic
+		{
+			s: ".display-inline-block",
+			r: "display: inline-block;"
+		},
+		// // fix Roll20's <p> margins in the text editor // FIXME make this configurable
+		// {
+		// 	s: ".note-editable p",
+		// 	r: "margin-bottom: 0;"
+		// },
+		// page view enhancement
+		{
+			s: "#page-toolbar",
+			r: "height: calc(90vh - 40px);"
+		},
+		{
+			s: "#page-toolbar .container",
+			r: "height: 100%; white-space: normal;"
+		},
+		{
+			s: "#page-toolbar .pages .availablepage",
+			r: "width: 100px; height: 100px;"
+		},
+		{
+			s: "#page-toolbar .pages .availablepage img.pagethumb",
+			r: "max-width: 60px; max-height: 60px;"
+		},
+		{
+			s: "#page-toolbar .pages .availablepage span",
+			r: "bottom: 1px;"
+		},
+		{
+			s: "#page-toolbar",
+			r: "background: #a8aaad80;"
+		},
+		// search
+		{
+			s: ".Vetoolsresult",
+			r: "background: #ff8080;"
+		},
+		// config editor
+		{
+			s: "div.config-table-wrapper",
+			r: "min-height: 200px; width: 100%; height: 100%; max-height: 460px; overflow-y: auto; transform: translateZ(0);"
+		},
+		{
+			s: "table.config-table",
+			r: "width: 100%; table-layout: fixed;"
+		},
+		{
+			s: "table.config-table tbody tr:nth-child(odd)",
+			r: "background-color: #f8f8f8;"
+		},
+		{
+			s: "table.config-table tbody td > *",
+			r: "vertical-align: middle; margin: 0;"
+		},
+		{
+			s: ".config-name",
+			r: "display: inline-block; line-height: 35px; width: 100%;"
+		},
+		// tool list
+		{
+			s: ".tools-list",
+			r: "max-height: 70vh;"
+		},
+		{
+			s: ".tool-row",
+			r: "min-height: 40px; display: flex; flex-direction: row; align-items: center;"
+		},
+		{
+			s: ".tool-row:nth-child(odd)",
+			r: "background-color: #f0f0f0;"
+		},
+		{
+			s: ".tool-row > *",
+			r: "flex-shrink: 0;"
+		},
+		// warning overlay
+		{
+			s: ".temp-warning",
+			r: "position: fixed; top: 12px; left: calc(50vw - 200px); z-index: 10000; width: 320px; background: transparent; color: red; font-weight: bold; font-size: 150%; font-variant: small-caps; border: 1px solid red; padding: 4px; text-align: center; border-radius: 4px;"
+		},
+		// GM hover text
+		{
+			s: ".Vetools-token-hover",
+			r: "pointer-events: none; position: fixed; z-index: 100000; background: white; padding: 5px 5px 0 5px; border-radius: 5px;     border: 1px solid #ccc; max-width: 450px;"
+		},
+		// drawing tools bar
+		{
+			s: "#drawingtools.line_splitter .currentselection:after",
+			r: "content: '✂️';"
+		},
+		// chat tag
+		{
+			s: ".userscript-hacker-chat",
+			r: "margin-left: -45px; margin-right: -5px; margin-bottom: -7px; margin-top: -15px; display: inline-block; font-weight: bold; font-family: 'Lucida Console', Monaco, monospace; color: #20C20E; background: black; padding: 3px;"
+		},
+		{
+			s: ".userscript-hacker-chat a",
+			r: "color: white;"
+		},
+		{
+			s: ".withoutavatars .userscript-hacker-chat",
+			r: "margin-left: -15px;"
+		},
+		// Bootstrap-alikes
+		{
+			s: ".col-1",
+			r: "width: 8.333%;"
+		},
+		{
+			s: ".col-2",
+			r: "width: 16.666%;"
+		},
+		{
+			s: ".col-3",
+			r: "width: 25%;"
+		},
+		{
+			s: ".col-4",
+			r: "width: 33.333%;"
+		},
+		{
+			s: ".col-5",
+			r: "width: 41.667%;"
+		},
+		{
+			s: ".col-6",
+			r: "width: 50%;"
+		},
+		{
+			s: ".col-7",
+			r: "width: 58.333%;"
+		},
+		{
+			s: ".col-8",
+			r: "width: 66.667%;"
+		},
+		{
+			s: ".col-9",
+			r: "width: 75%;"
+		},
+		{
+			s: ".col-10",
+			r: "width: 83.333%;"
+		},
+		{
+			s: ".col-11",
+			r: "width: 91.667%;"
+		},
+		{
+			s: ".col-12",
+			r: "width: 100%;"
+		},
+		{
+			s: ".ib",
+			r: "display: inline-block;"
+		},
+		{
+			s: ".float-right",
+			r: "float: right;"
+		},
+		// image rows
+		{
+			s: ".import-cb-label--img",
+			r: "display: flex; height: 64px; align-items: center; padding: 4px;"
+		},
+		{
+			s: ".import-label__img",
+			r: "display: inline-block; width: 60px; height: 60px; padding: 0 5px;"
+		},
+		// importer
+		{
+			s: ".import-cb-label",
+			r: "display: block; margin-right: -13px !important;"
+		},
+		{
+			s: ".import-cb-label span",
+			r: "display: inline-block; overflow: hidden; max-height: 18px; letter-spacing: -1px; font-size: 12px;"
+		},
+		{
+			s: ".import-cb-label span.readable",
+			r: "letter-spacing: initial"
+		},
+		{
+			s: ".import-cb-label .source",
+			r: "width: calc(16.667% - 28px);'"
+		},
+		// horizontal toolbar
+		{
+			s: "#secondary-toolbar:hover",
+			r: "opacity: 1 !important;"
+		},
+	];
+
+	d20plus.css.baseCssRulesPlayer = [
+		{
+			s: ".player-hidden",
+			r: "display: none !important;"
+		}
+	];
+
+	d20plus.css.cssRules = []; // other scripts should populate this
+}
+
+SCRIPT_EXTENSIONS.push(baseCss);
+
+
+function baseUi () {
+	d20plus.ui = {};
+
+	d20plus.ui.addHtmlHeader = () => {
+		d20plus.ut.log("Add HTML");
+		const $body = $("body");
+
+		const $wrpSettings = $(`<div id="betteR20-settings"/>`);
+		$("#mysettings > .content").children("hr").first().before($wrpSettings);
+
+		$wrpSettings.append(d20plus.settingsHtmlHeader);
+		$body.append(d20plus.configEditorHTML);
+		if (window.is_gm) {
+			$(`#imagedialog`).find(`.searchbox`).find(`.tabcontainer`).first().after(d20plus.artTabHtml);
+			$(`a#button-add-external-art`).on(window.mousedowntype, d20plus.art.button);
+
+			$body.append(d20plus.addArtHTML);
+			$body.append(d20plus.addArtMassAdderHTML);
+			$body.append(d20plus.tool.toolsListHtml);
+			$("#d20plus-artfolder").dialog({
+				autoOpen: false,
+				resizable: true,
+				width: 800,
+				height: 400,
+			});
+			$("#d20plus-artmassadd").dialog({
+				autoOpen: false,
+				resizable: true,
+				width: 800,
+				height: 400,
+			});
+		}
+		const $cfgEditor = $("#d20plus-configeditor");
+		$cfgEditor.dialog({
+			autoOpen: false,
+			resizable: true,
+			width: 800,
+			height: 650,
+		});
+		$cfgEditor.parent().append(d20plus.configEditorButtonBarHTML);
+
+		// shared GM/player conent
+		// quick search box
+		const $iptSearch = $(`<input id="player-search" class="ui-autocomplete-input" autocomplete="off" placeholder="Quick search by name...">`);
+		const $wrprResults = $(`<div id="player-search-results" class="content searchbox"/>`);
+
+		if (window.is_gm) {
+			$iptSearch.css("width", "calc(100% - 5px)");
+			const $addPoint = $("#journal").find("button.btn.superadd");
+			$addPoint.after($wrprResults);
+			$addPoint.after(`<br>`);
+			$addPoint.after($iptSearch);
+			$addPoint.after(`<br><br>`);
+		} else {
+			const $wrprControls = $(`<div class="content searchbox" id="search-wrp-controls"/>`);
+			$(`#journal .content`).before($wrprControls).before($wrprResults);
+			$iptSearch.css("max-width", "calc(100% - 140px)");
+			$wrprControls.append($iptSearch);
+		}
+		d20plus.engine.initQuickSearch($iptSearch, $wrprResults);
+	};
+
+	d20plus.ui.addHtmlFooter = () => {
+		const $wrpSettings = $(`#betteR20-settings`);
+		$wrpSettings.append(d20plus.settingsHtmlPtFooter);
+
+		$("#mysettings > .content a#button-edit-config").on(window.mousedowntype, d20plus.cfg.openConfigEditor);
+		$("#button-manage-qpi").on(window.mousedowntype, qpi._openManager);
+		d20plus.tool.addTools();
+	};
+}
+
+SCRIPT_EXTENSIONS.push(baseUi);
+
+
+/**
+ * All the modified minified based on parts of Roll20's `app.js`
+ */
+function d20plusMod() {
+	d20plus.mod = {};
+
+	// modified to allow players to use the FX tool, and to keep current colour selections when switching tool
+	// BEGIN ROLL20 CODE
+	d20plus.mod.setMode = function (e) {
+		d20plus.ut.log("Setting mode " + e);
+		// BEGIN MOD
+		// "text" === e || "rect" === e || "polygon" === e || "path" === e || "pan" === e || "select" === e || "targeting" === e || "measure" === e || window.is_gm || (e = "select"),
+		// END MOD
+		"text" == e ? $("#editor").addClass("texteditmode") : $("#editor").removeClass("texteditmode"),
+			$("#floatingtoolbar li").removeClass("activebutton"),
+			$("#" + e).addClass("activebutton"),
+		"fog" == e.substring(0, 3) && $("#fogcontrols").addClass("activebutton"),
+		"rect" == e && ($("#drawingtools").addClass("activebutton"),
+			$("#drawingtools").removeClass("text path polygon line_splitter").addClass("rect")),
+		"text" == e && ($("#drawingtools").addClass("activebutton"),
+			$("#drawingtools").removeClass("rect path polygon line_splitter").addClass("text")),
+		"path" == e && $("#drawingtools").addClass("activebutton").removeClass("text rect polygon line_splitter").addClass("path"),
+			"polygon" == e ? $("#drawingtools").addClass("activebutton").removeClass("text rect path line_splitter").addClass("polygon") : d20.engine.finishCurrentPolygon(),
+			// BEGIN MOD (also line_splitter added to above removeClass calls
+		"line_splitter" == e && ($("#drawingtools").addClass("activebutton"),
+			$("#drawingtools").removeClass("rect path polygon text").addClass("line_splitter")),
+			// END MOD
+		"pan" !== e && "select" !== e && d20.engine.unselect(),
+			"pan" == e ? ($("#select").addClass("pan").removeClass("select").addClass("activebutton"),
+				d20.token_editor.removeRadialMenu(),
+				$("#editor-wrapper").addClass("panning")) : $("#editor-wrapper").removeClass("panning"),
+		"select" == e && $("#select").addClass("select").removeClass("pan").addClass("activebutton"),
+			$("#floatingtoolbar .mode").hide(),
+		("text" == e || "select" == e) && $("#floatingtoolbar ." + e).show(),
+			"gridalign" == e ? $("#gridaligninstructions").show() : "gridalign" === d20.engine.mode && $("#gridaligninstructions").hide(),
+			"targeting" === e ? ($("#targetinginstructions").show(),
+				$("#upperCanvas").addClass("targeting"),
+				d20.engine.canvas.hoverCursor = "crosshair") : "targeting" === d20.engine.mode && ($("#targetinginstructions").hide(),
+				$("#upperCanvas").removeClass("targeting"),
+			d20.engine.nextTargetCallback && _.defer(function () {
+				d20.engine.nextTargetCallback && d20.engine.nextTargetCallback(!1)
+			}),
+				d20.engine.canvas.hoverCursor = "move"),
+			// BEGIN MOD
+			// console.log("Switch mode to " + e),
+			d20.engine.mode = e,
+		"measure" !== e && window.currentPlayer && d20.engine.measurements[window.currentPlayer.id] && !d20.engine.measurements[window.currentPlayer.id].sticky && (d20.engine.announceEndMeasure({
+			player: window.currentPlayer.id
+		}),
+			d20.engine.endMeasure()),
+			d20.engine.canvas.isDrawingMode = "path" == e ? !0 : !1;
+		if ("text" == e || "path" == e || "rect" == e || "polygon" == e || "fxtools" == e
+			// BEGIN MOD
+			|| "measure" == e) {
+			// END MOD
+			$("#secondary-toolbar").show();
+			$("#secondary-toolbar .mode").hide();
+			$("#secondary-toolbar ." + e).show();
+			("path" == e || "rect" == e || "polygon" == e) && ("" === $("#path_strokecolor").val() && ($("#path_strokecolor").val("#000000").trigger("change-silent"),
+				$("#path_fillcolor").val("transparent").trigger("change-silent")),
+				d20.engine.canvas.freeDrawingBrush.color = $("#path_strokecolor").val(),
+				d20.engine.canvas.freeDrawingBrush.fill = $("#path_fillcolor").val() || "transparent",
+				$("#path_width").trigger("change")),
+			"fxtools" == e && "" === $("#fxtools_color").val() && $("#fxtools_color").val("#a61c00").trigger("change-silent"),
+				$("#floatingtoolbar").trigger("blur")
+		} else {
+			$("#secondary-toolbar").hide();
+			$("#floatingtoolbar").trigger("blur");
+		}
+		// END MOD
+	};
+	// END ROLL20 CODE
+
+	d20plus.mod.drawMeasurements = function () {
+		// BEGIN ROLL20 CODE
+		var E = function(e, t) {
+			let n = {
+				scale: 0,
+				grid: 0
+			}
+				, i = 0
+				, o = -1;
+			_.each(t.waypoints, r=>{
+					let a = {
+						to_x: r[0],
+						to_y: r[1],
+						color: t.color,
+						flags: t.flags,
+						hide: t.hide
+					};
+					o > -1 ? (a.x = t.waypoints[o][0],
+						a.y = t.waypoints[o][1]) : (a.x = t.x,
+						a.y = t.y);
+					let s = S(e, a, !0, "nub", n, i);
+					n.scale += s.scale_distance,
+						n.grid += s.grid_distance,
+						i = s.diagonals % 2,
+						++o
+				}
+			);
+			let r = {
+				to_x: t.to_x,
+				to_y: t.to_y,
+				color: t.color,
+				flags: t.flags,
+				hide: t.hide,
+				Ve: t.Ve
+			};
+			-1 === o ? (r.x = t.x,
+				r.y = t.y) : (r.x = t.waypoints[o][0],
+				r.y = t.waypoints[o][1]),
+				S(e, r, !0, "arrow", n, i)
+		}
+
+		var S = function(e, t, n, i, o, r) {
+			let a = e=>e / d20.engine.canvasZoom
+				, s = d20.engine.getDistanceInScale({
+				x: t.x,
+				y: t.y
+			}, {
+				x: t.to_x,
+				y: t.to_y
+			}, r, 15 & t.flags);
+			e.globalCompositeOperation = "source-over",
+				e.strokeStyle = t.color,
+				e.fillStyle = e.strokeStyle,
+				e.lineWidth = a(3);
+			let l = {
+				line: [t.to_x - t.x, t.to_y - t.y],
+				arrow: [[-10.16, -24.53], [0, -20.33], [10.16, -24.53]],
+				x: [1, 0],
+				y: [0, 1]
+			};
+			if (e.beginPath(),
+				e.moveTo(t.x, t.y),
+				e.lineTo(t.to_x, t.to_y),
+			!0 === i || "arrow" === i) {
+				let n = Math.atan2(l.line[1], l.line[0]);
+				l.forward = [Math.cos(n), Math.sin(n)],
+					l.right = [Math.cos(n + Math.PI / 2), Math.sin(n + Math.PI / 2)],
+					l.arrow = _.map(l.arrow, e=>[d20.math.dot(e, l.right), d20.math.dot(e, l.forward)]),
+					l.arrow = _.map(l.arrow, e=>[d20.math.dot(e, l.x), d20.math.dot(e, l.y)]),
+					e.moveTo(t.to_x, t.to_y),
+					_.each(l.arrow, n=>e.lineTo(t.to_x + a(n[0]), t.to_y + a(n[1]))),
+					e.closePath(),
+					e.fill()
+			}
+			if (e.closePath(),
+				e.stroke(),
+			"nub" === i && (e.beginPath(),
+				e.arc(t.to_x, t.to_y, a(7), 0, 2 * Math.PI, !0),
+				e.closePath(),
+				e.fill()),
+				n) {
+				let n = Math.round(a(16))
+					, i = Math.round(a(14));
+				e.font = `${n}px Arial Black`,
+					e.textBaseline = "alphabetic",
+					e.textAlign = "center";
+				let r = {
+					distance: Math.round(10 * (s.scale_distance + (o ? o.scale : 0))) / 10,
+					units: d20.Campaign.activePage().get("scale_units")
+				};
+				r.text = `${r.distance} ${r.units}`,
+					r.text_metrics = e.measureText(r.text);
+				let l = {
+					active: d20.Campaign.activePage().get("showgrid") && d20.engine.snapTo > 0 && "sq" !== r.units && "hex" !== r.units,
+					text: ""
+				};
+				if (l.active) {
+					let t = d20.Campaign.activePage().get("grid_type")
+						, n = "hex" === t || "hexr" === t ? "hex" : "sq";
+					e.font = `${i}px Arial`,
+						l.distance = Math.round(10 * (s.grid_distance + (o ? o.grid : 0))) / 10,
+						l.text = `${l.distance} ${n}`,
+						l.text_metrics = e.measureText(l.text)
+				}
+				let c = n - Math.round(a(4))
+					, u = i - Math.round(a(3.5))
+					, d = {
+					x: t.to_x - Math.round(a(35)),
+					y: t.to_y - Math.round(a(35)),
+					width: Math.max(r.text_metrics.width, l.active ? l.text_metrics.width : 0),
+					height: c,
+					padding: Math.round(a(5)),
+					scale_baseline_offset: 0,
+					cell_baseline_offset: 0,
+					text_horizontal_offset: 0,
+					line_spacing: Math.ceil(a(4)),
+					image_width: a(20),
+					image_height: a(20),
+					image_padding_left: a(5)
+				};
+				d.height += 2 * d.padding,
+					d.width += 2 * d.padding,
+					d.text_horizontal_offset = .5 * d.width,
+					d.scale_baseline_offset = d.height - d.padding,
+				l.active && (d.height += u + d.line_spacing,
+					d.cell_baseline_offset = d.height - d.padding),
+				t.hide && (d.width += d.image_width + d.image_padding_left,
+					d.height = Math.max(d.height, d.image_height + 2 * d.padding),
+					d.text_width = Math.max(r.text_metrics.width, l.active ? l.text_metrics.width : 0)),
+					e.fillStyle = "rgba(255,255,255,0.75)",
+					e.fillRect(d.x, d.y, d.width, d.height),
+					e.fillStyle = "rgba(0,0,0,1)",
+					e.font = `${n}px Arial Black`,
+					e.fillText(r.text, d.x + d.text_horizontal_offset, d.y + d.scale_baseline_offset),
+					e.font = `${i}px Arial`,
+					e.fillText(l.text, d.x + d.text_horizontal_offset, d.y + d.cell_baseline_offset),
+				t.hide && (d.image_vertical_offset = .5 * d.height - .5 * d.image_height,
+					d.image_horizontal_offset = d.padding + d.text_width + d.image_padding_left,
+					e.drawImage($("#measure li.rulervisibility[mode='hide'] > img")[0], d.x + d.image_horizontal_offset, d.y + d.image_vertical_offset, d.image_width, d.image_height))
+			}
+
+			// BEGIN MOD
+			if (t.Ve) {
+				const RAD_90_DEG = 1.5708;
+
+				const euclid = (x1, y1, x2, y2) => {
+					const a = x1 - x2;
+					const b = y1 - y2;
+					return Math.sqrt(a * a + b * b)
+				};
+
+				const rotPoint = (angleRad, pX, pY) => {
+					const s = Math.sin(angleRad);
+					const c = Math.cos(angleRad);
+
+					pX -= t.x;
+					pY -= t.y;
+
+					const xNew = pX * c - pY * s;
+					const yNew = pX * s + pY * c;
+
+					pX = xNew + t.x;
+					pY = yNew + t.y;
+					return [pX, pY];
+				};
+
+				const getLineEquation = (x1, y1, x2, y2) => {
+					const getM = () => {
+						return (y2 - y1) / (x2 - x1)
+					};
+					const m = getM();
+
+					const getC = () => {
+						return y1 - (m * x1);
+					};
+
+					const c = getC();
+
+					return {
+						fn: (x) => (m * x) + c,
+						m, c
+					}
+				};
+
+				const getPerpLineEquation = (x, y, line) => {
+					const m2 = -1 / line.m
+					const c2 = y - (m2 * x);
+					return {
+						fn: (x) => (m2 * x) + c2,
+						m: m2, c: c2
+					}
+				};
+
+				const getIntersect = (pointPerp, line1, line2) => {
+					if (Math.abs(line1.m) === Infinity) {
+						// intersecting with the y-axis...
+						return [pointPerp[0], line2.fn(pointPerp[0])];
+					} else {
+						const x = (line2.c - line1.c) / (line1.m - line2.m);
+						const y = line1.fn(x);
+						return [x, y];
+					}
+				};
+
+				switch (t.Ve.mode) {
+					case "1": // standard ruler
+						break;
+					case "2": { // radius
+						const drawCircle = (cx, cy, rad) => {
+							e.beginPath();
+							e.arc(cx, cy, rad, 0, 2*Math.PI);
+							e.stroke();
+							e.closePath();
+						};
+
+						switch (t.Ve.radius.mode) {
+							case "1": // origin
+								drawCircle(t.x, t.y, euclid(t.x, t.y, t.to_x, t.to_y));
+								break;
+							case "2": { // halfway
+								const dx = t.to_x - t.x;
+								const dy = t.to_y - t.y;
+								const cX = t.x + (dx / 2);
+								const cY = t.y + (dy / 2);
+
+								drawCircle(cX, cY, euclid(cX, cY, t.to_x, t.to_y));
+								break;
+							}
+						}
+
+						break;
+					}
+					case "3": { // cone
+						const arcRadians = (Number(t.Ve.cone.arc) || 0.017) / 2; // 1 degree minimum
+
+						const r = euclid(t.x, t.y, t.to_x, t.to_y);
+						const dx = t.to_x - t.x;
+						const dy = t.to_y - t.y;
+						const startR = Math.atan2(dy, dx);
+
+						if (t.Ve.cone.mode === "1") {
+							const line = getLineEquation(t.x, t.y, t.to_x, t.to_y);
+							const perpLine = getPerpLineEquation(t.to_x, t.to_y, line);
+
+							const pRot1 = rotPoint(arcRadians, t.to_x, t.to_y);
+							const lineRot1 = getLineEquation(t.x, t.y, pRot1[0], pRot1[1]);
+							const intsct1 = getIntersect([t.to_x, t.to_y], perpLine, lineRot1);
+
+							// border line 1
+							e.beginPath();
+							e.moveTo(t.x, t.y);
+							e.lineTo(intsct1[0], intsct1[1]);
+							e.stroke();
+							e.closePath();
+
+							// perp line 1
+							e.beginPath();
+							e.moveTo(t.to_x, t.to_y);
+							e.lineTo(intsct1[0], intsct1[1]);
+							e.stroke();
+							e.closePath();
+
+							const pRot2 = rotPoint(-arcRadians, t.to_x, t.to_y);
+							const lineRot2 = getLineEquation(t.x, t.y, pRot2[0], pRot2[1]);
+							const intsct2 = getIntersect([t.to_x, t.to_y], perpLine, lineRot2);
+
+							// border line 2
+							e.beginPath();
+							e.moveTo(t.x, t.y);
+							e.lineTo(intsct2[0], intsct2[1]);
+							e.stroke();
+							e.closePath();
+
+							// perp line 2
+							e.beginPath();
+							e.moveTo(t.to_x, t.to_y);
+							e.lineTo(intsct2[0], intsct2[1]);
+							e.stroke();
+							e.closePath();
+						} else {
+							// arc 1
+							e.beginPath();
+							e.arc(t.x, t.y, r, startR, startR + arcRadians);
+							e.stroke();
+							e.closePath();
+							// arc 2
+							e.beginPath();
+							e.arc(t.x, t.y, r, startR, startR - arcRadians, true); // draw counter-clockwise
+							e.stroke();
+							e.closePath();
+
+							// border line 1
+							const s1 = Math.sin(arcRadians);
+							const c1 = Math.cos(arcRadians);
+							const xb1 = dx * c1 - dy * s1;
+							const yb1 = dx * s1 + dy * c1;
+							e.beginPath();
+							e.moveTo(t.x, t.y);
+							e.lineTo(t.x + xb1, t.y + yb1);
+							e.stroke();
+							e.closePath();
+
+							// border line 2
+							const s2 = Math.sin(-arcRadians);
+							const c2 = Math.cos(-arcRadians);
+							const xb2 = dx * c2 - dy * s2;
+							const yb2 = dx * s2 + dy * c2;
+							e.beginPath();
+							e.moveTo(t.x, t.y);
+							e.lineTo(t.x + xb2, t.y + yb2);
+							e.stroke();
+							e.closePath();
+						}
+						break;
+					}
+					case "4": { // box
+						const dxHalf = (t.to_x - t.x) / 2;
+						const dyHalf = (t.to_y - t.y) / 2;
+
+						e.beginPath();
+						switch (t.Ve.box.mode) {
+							case "1": // origin
+								const dx = t.to_x - t.x;
+								const dy = t.to_y - t.y;
+
+								const [x1, y1] = rotPoint(RAD_90_DEG, t.to_x, t.to_y);
+								const [x3, y3] = rotPoint(-RAD_90_DEG, t.to_x, t.to_y);
+
+								e.moveTo(x1, y1);
+								e.lineTo(x1 + dx, y1 + dy);
+								e.lineTo(x3 + dx, y3 + dy);
+								e.lineTo(x3 - dx, y3 - dy);
+								e.lineTo(x1 - dx, y1 - dy);
+								e.lineTo(x1 + dx, y1 + dy);
+
+								break;
+							case "2": { // halfway
+								const [x1, y1] = rotPoint(RAD_90_DEG, t.to_x - dxHalf, t.to_y - dyHalf);
+								const [x3, y3] = rotPoint(-RAD_90_DEG, t.to_x - dxHalf, t.to_y - dyHalf);
+
+								e.moveTo(t.x, t.y);
+								e.lineTo(x1, y1);
+								e.lineTo(x3, y3);
+
+								const dx3 = (x3 - t.x);
+								const dy3 = (y3 - t.y);
+								e.lineTo(t.to_x + dx3, t.to_y + dy3);
+
+								const dx1 = (x1 - t.x);
+								const dy1 = (y1 - t.y);
+								e.lineTo(t.to_x + dx1, t.to_y + dy1);
+
+								e.lineTo(x1, y1);
+
+								break;
+							}
+						}
+						e.stroke();
+						e.closePath();
+						break;
+					}
+					case "5": { // line
+						e.beginPath();
+
+						const div = t.Ve.line.mode === "2" ? 1 : 2;
+
+						const norm = [];
+						d20plus.math.normalize(norm, [t.to_x - t.x, t.to_y - t.y]);
+						const width = (Number(t.Ve.line.width) || 0.1) / div;
+						const scaledWidth = (width / d20.Campaign.activePage().get("scale_number")) * 70;
+						d20plus.math.scale(norm, norm, scaledWidth);
+
+						const xRot = t.x + norm[0];
+						const yRot = t.y + norm[1];
+
+						const [x1, y1] = rotPoint(RAD_90_DEG, xRot, yRot);
+						const [x3, y3] = rotPoint(-RAD_90_DEG, xRot, yRot);
+						console.log(t.x, t.y, norm, xRot, yRot);
+
+						e.moveTo(t.x, t.y);
+						e.lineTo(x1, y1);
+						e.lineTo(x3, y3);
+
+						const dx3 = (x3 - t.x);
+						const dy3 = (y3 - t.y);
+						e.lineTo(t.to_x + dx3, t.to_y + dy3);
+
+						const dx1 = (x1 - t.x);
+						const dy1 = (y1 - t.y);
+						e.lineTo(t.to_x + dx1, t.to_y + dy1);
+
+						e.lineTo(x1, y1);
+
+						e.stroke();
+						e.closePath();
+						break;
+					}
+				}
+			}
+			// END MOD
+
+			return s
+		};
+
+		d20.engine.drawMeasurements = function (e) {
+			e.globalCompositeOperation = "source-over",
+				e.globalAlpha = 1,
+				_.each(d20.engine.measurements, function(t) {
+					if (t.pageid !== d20.Campaign.activePage().id)
+						return;
+					let n = {
+						color: d20.Campaign.players.get(t.player).get("color"),
+						to_x: t.to_x - d20.engine.currentCanvasOffset[0],
+						to_y: t.to_y - d20.engine.currentCanvasOffset[1],
+						x: t.x - d20.engine.currentCanvasOffset[0],
+						y: t.y - d20.engine.currentCanvasOffset[1],
+						flags: t.flags,
+						hide: t.hide,
+						waypoints: _.map(t.waypoints, e=>[e[0] - d20.engine.currentCanvasOffset[0], e[1] - d20.engine.currentCanvasOffset[1]])
+						// BEGIN MOD
+						,
+						Ve: t.Ve ? JSON.parse(JSON.stringify(t.Ve)) : undefined
+						// END MOD
+					};
+					E(e, n)
+				})
+
+			// BEGIN MOD
+			const offset = (num, offset, xy) => {
+				return (num + offset[xy]) - d20.engine.currentCanvasOffset[xy];
+			};
+
+			// unrelated code, but throw it in the render loop here
+			let doRender = false;
+			$.each(d20plus.engine._tempTopRenderLines, (id, toDraw) => {
+				console.log("DRAWING", toDraw.ticks, toDraw.offset)
+				e.beginPath();
+				e.strokeStyle = window.currentPlayer.get("color");
+				e.lineWidth = 2;
+
+				const nuX = offset(toDraw.x - d20.engine.currentCanvasOffset[0], toDraw.offset, 0);
+				const nuY = offset(toDraw.y - d20.engine.currentCanvasOffset[1], toDraw.offset, 1);
+				const nuToX = offset(toDraw.to_x - d20.engine.currentCanvasOffset[0], toDraw.offset, 0);
+				const nuToY = offset(toDraw.to_y - d20.engine.currentCanvasOffset[1], toDraw.offset, 1);
+
+				e.moveTo(nuX, nuY);
+				e.lineTo(nuToX, nuToY);
+
+				e.moveTo(nuToX, nuY);
+				e.lineTo(nuX, nuToY);
+
+				e.stroke();
+				e.closePath();
+
+				toDraw.ticks--;
+				doRender = true;
+				if (toDraw.ticks <= 0) {
+					delete d20plus.engine._tempTopRenderLines[id];
+				}
+			});
+			if (doRender) {
+				d20.engine.debounced_renderTop()
+			}
+			// END MOD
+		}
+		// END ROLL20 CODE
+	};
+
+	d20plus.mod.overwriteStatusEffects = function () {
+		d20.engine.canvasDirty = true;
+		d20.engine.canvasTopDirty = true;
+		d20.engine.canvas._objects.forEach(it => {
+			// avoid adding it to any objects that wouldn't have it to begin with
+			if (!it.model || !it.model.view || !it.model.view.updateBackdrops) return;
+
+			// BEGIN ROLL20 CODE
+			it.model.view.updateBackdrops = function (e) {
+				if (!this.nohud && ("objects" == this.model.get("layer") || "gmlayer" == this.model.get("layer")) && "image" == this.model.get("type") && this.model && this.model.collection && this.graphic) {
+					// BEGIN MOD
+					const scaleFact = (d20plus.cfg.getCfgVal("canvas", "scaleNamesStatuses") && d20.Campaign.activePage().get("snapping_increment"))
+						? d20.Campaign.activePage().get("snapping_increment")
+						: 1;
+					// END MOD
+					var t = this.model.collection.page
+						, n = e || d20.engine.canvas.getContext();
+					n.save(),
+					(this.graphic.get("flipX") || this.graphic.get("flipY")) && n.scale(this.graphic.get("flipX") ? -1 : 1, this.graphic.get("flipY") ? -1 : 1);
+					var i = this
+						, r = Math.floor(this.graphic.get("width") / 2)
+						, o = Math.floor(this.graphic.get("height") / 2)
+						, a = (parseFloat(t.get("scale_number")),
+						this.model.get("statusmarkers").split(","));
+					-1 !== a.indexOf("dead") && (n.strokeStyle = "rgba(189,13,13,0.60)",
+						n.lineWidth = 10,
+						n.beginPath(),
+						n.moveTo(-r + 7, -o + 15),
+						n.lineTo(r - 7, o - 5),
+						n.moveTo(r - 7, -o + 15),
+						n.lineTo(-r + 7, o - 5),
+						n.closePath(),
+						n.stroke()),
+						n.rotate(-this.graphic.get("angle") * Math.PI / 180),
+						n.strokeStyle = "rgba(0,0,0,0.65)",
+						n.lineWidth = 1;
+					var s = 0
+						, l = i.model.get("bar1_value")
+						, c = i.model.get("bar1_max");
+					if ("" != c && (window.is_gm || this.model.get("showplayers_bar1") || this.model.currentPlayerControls() && this.model.get("playersedit_bar1"))) {
+						var u = parseInt(l, 10) / parseInt(c, 10)
+							, d = -o - 20 + 0;
+						n.fillStyle = "rgba(" + d20.Campaign.tokendisplay.bar1_rgb + ",0.75)",
+							n.beginPath(),
+							n.rect(-r + 3, d, Math.floor((2 * r - 6) * u), 8),
+							n.closePath(),
+							n.fill(),
+							n.beginPath(),
+							n.rect(-r + 3, d, 2 * r - 6, 8),
+							n.closePath(),
+							n.stroke(),
+							s++
+					}
+					var l = i.model.get("bar2_value")
+						, c = i.model.get("bar2_max");
+					if ("" != c && (window.is_gm || this.model.get("showplayers_bar2") || this.model.currentPlayerControls() && this.model.get("playersedit_bar2"))) {
+						var u = parseInt(l, 10) / parseInt(c, 10)
+							, d = -o - 20 + 12;
+						n.fillStyle = "rgba(" + d20.Campaign.tokendisplay.bar2_rgb + ",0.75)",
+							n.beginPath(),
+							n.rect(-r + 3, d, Math.floor((2 * r - 6) * u), 8),
+							n.closePath(),
+							n.fill(),
+							n.beginPath(),
+							n.rect(-r + 3, d, 2 * r - 6, 8),
+							n.closePath(),
+							n.stroke(),
+							s++
+					}
+					var l = i.model.get("bar3_value")
+						, c = i.model.get("bar3_max");
+					if ("" != c && (window.is_gm || this.model.get("showplayers_bar3") || this.model.currentPlayerControls() && this.model.get("playersedit_bar3"))) {
+						var u = parseInt(l, 10) / parseInt(c, 10)
+							, d = -o - 20 + 24;
+						n.fillStyle = "rgba(" + d20.Campaign.tokendisplay.bar3_rgb + ",0.75)",
+							n.beginPath(),
+							n.rect(-r + 3, d, Math.floor((2 * r - 6) * u), 8),
+							n.closePath(),
+							n.fill(),
+							n.beginPath(),
+							n.rect(-r + 3, d, 2 * r - 6, 8),
+							n.closePath(),
+							n.stroke()
+					}
+					var h, p, g = 1, f = !1;
+					switch (d20.Campaign.get("markers_position")) {
+						case "bottom":
+							h = o - 10,
+								p = r;
+							break;
+						case "left":
+							h = -o - 10,
+								p = -r,
+								f = !0;
+							break;
+						case "right":
+							h = -o - 10,
+								p = r - 18,
+								f = !0;
+							break;
+						default:
+							h = -o + 10,
+								p = r
+					}
+					// BEGIN MOD
+					n.strokeStyle = "white";
+					n.lineWidth = 3 * scaleFact;
+					const scaledFont = 14 * scaleFact;
+					n.font = "bold " + scaledFont + "px Arial";
+					// END MOD
+					_.each(a, function (e) {
+						var t = d20.token_editor.statusmarkers[e.split("@")[0]];
+						if (!t)
+							return !0;
+						if ("dead" === e)
+							return !0;
+						var i = 0;
+						if (g--,
+						"#" === t.substring(0, 1))
+							n.fillStyle = t,
+								n.beginPath(),
+								f ? h += 16 : p -= 16,
+								n.arc(p + 8, f ? h + 4 : h, 6, 0, 2 * Math.PI, !0),
+								n.closePath(),
+								n.stroke(),
+								n.fill(),
+								i = f ? 10 : 4;
+						else {
+							// BEGIN MOD
+							if (!d20.token_editor.statussheet_ready) return;
+							const scaledWH = 21 * scaleFact;
+							const scaledOffset = 22 * scaleFact;
+							f ? h += scaledOffset : p -= scaledOffset;
+
+							if (d20.engine.canvasZoom <= 1) {
+								n.drawImage(d20.token_editor.statussheet_small, parseInt(t, 10), 0, 21, 21, p, h - 9, scaledWH, scaledWH);
+							} else {
+								n.drawImage(d20.token_editor.statussheet, parseInt(t, 10), 0, 24, 24, p, h - 9, scaledWH, scaledWH)
+							}
+
+							i = f ? 14 : 12;
+							i *= scaleFact;
+							// END MOD
+						}
+						if (-1 !== e.indexOf("@")) {
+							var r = e.split("@")[1];
+							// BEGIN MOD
+							// bing backtick to "clear counter"
+							if (r === "`") return;
+							n.fillStyle = "rgb(222,31,31)";
+							var o = f ? 9 : 14;
+							o *= scaleFact;
+							o -= (14 - (scaleFact * 14));
+							n.strokeText(r + "", p + i, h + o);
+							n.fillText(r + "", p + i, h + o);
+							// END MOD
+						}
+					});
+					var m = i.model.get("name");
+					if ("" != m && 1 == this.model.get("showname") && (window.is_gm || this.model.get("showplayers_name") || this.model.currentPlayerControls() && this.model.get("playersedit_name"))) {
+						n.textAlign = "center";
+						// BEGIN MOD
+						var y = 14 * scaleFact;
+						const scaledY = 22 * scaleFact;
+						const scaled6 = 6 * scaleFact;
+						const scaled8 = 8 * scaleFact;
+						n.font = "bold " + y + "px Arial";
+						var v = n.measureText(m).width;
+						n.fillStyle = "rgba(255,255,255,0.50)";
+						n.fillRect(-1 * Math.floor((v + scaled6) / 2), o + scaled8, v + scaled6, y + scaled6);
+						n.fillStyle = "rgb(0,0,0)";
+						n.fillText(m + "", 0, o + scaledY, v);
+						// END MOD
+					}
+					n.restore()
+				}
+			}
+			// END ROLL20 CODE
+		});
+	};
+
+	d20plus.mod.mouseEnterMarkerMenu = function () {
+		var e = this;
+		$(this).on("mouseover.statusiconhover", ".statusicon", function () {
+			a = $(this).attr("data-action-type").replace("toggle_status_", "")
+		}),
+			$(document).on("keypress.statusnum", function (t) {
+				// BEGIN MOD // TODO see if this clashes with keyboard shortcuts
+				if ("dead" !== a && currentcontexttarget) {
+					// END MOD
+					var n = String.fromCharCode(t.which)
+						,
+						i = "" == currentcontexttarget.model.get("statusmarkers") ? [] : currentcontexttarget.model.get("statusmarkers").split(",")
+						, r = (_.map(i, function (e) {
+							return e.split("@")[0]
+						}),
+							!1);
+					i = _.map(i, function (e) {
+						return e.split("@")[0] == a ? (r = !0,
+						a + "@" + n) : e
+					}),
+					r || ($(e).find(".statusicon[data-action-type=toggle_status_" + a + "]").addClass("active"),
+						i.push(a + "@" + n)),
+						currentcontexttarget.model.save({
+							statusmarkers: i.join(",")
+						})
+				}
+			})
+	};
+
+	d20plus.engine.removeLinkConfirmation = function () {
+		d20.utils.handleURL = d20plus.mod.handleURL;
+		$(document).off("click", "a").on("click", "a", d20.utils.handleURL);
+	};
+
+	// BEGIN ROLL20 CODE
+	d20plus.mod.handleURL = function(e) {
+		if (!($(this).hasClass("lightly") || $(this).parents(".note-editable").length > 0)) {
+			var t = $(this).attr("href");
+			if (t !== undefined) {
+				if (-1 !== t.indexOf("journal.roll20.net") || -1 !== t.indexOf("wiki.roll20.net")) {
+					var n = t.split("/")[3]
+						, i = t.split("/")[4]
+						, o = d20.Campaign[n + "s"].get(i);
+					if (o) {
+						var r = o.get("inplayerjournals").split(",");
+						(window.is_gm || -1 !== _.indexOf(r, "all") || window.currentPlayer && -1 !== _.indexOf(r, window.currentPlayer.id)) && o.view.showDialog()
+					}
+					return $("#existing" + n + "s").find("tr[data-" + n + "id=" + i + "]").trigger("click"),
+						!1
+				}
+				var a = /(?:(?:http(?:s?):\/\/(?:app\.)?roll20\.(?:net|local:5000)\/|^\/?)compendium\/)([^\/]+)\/([^\/#?]+)/i
+					, s = t.match(a);
+				if (s)
+					return d20.utils.openCompendiumPage(s[1], s[2]),
+						e.stopPropagation(),
+						void e.preventDefault();
+				if (-1 !== t.indexOf("javascript:"))
+					return !1;
+				if ("!" === t.substring(0, 1))
+					return d20.textchat.doChatInput(t),
+						!1;
+				if ("~" === t.substring(0, 1))
+					return d20.textchat.doChatInput("%{" + t.substring(1, t.length) + "}"),
+						!1;
+
+				if (t !== undefined && ("external" === $(this).attr("rel") || -1 === t.indexOf("javascript:") && -1 !== t.indexOf("://"))) {
+					// BEGIN MOD
+					e.stopPropagation();
+					e.preventDefault();
+					window.open(t);
+					// END MOD
+				}
+			}
+		}
+	}
+	// END ROLL20 CODE
+};
+
+SCRIPT_EXTENSIONS.push(d20plusMod);
+
+
+const baseTemplate = function () {
+	d20plus.template = {};
+
+	d20plus.settingsHtmlPtFooter = `<p>
+			<a class="btn " href="#" id="button-edit-config" style="margin-top: 3px; width: calc(100% - 22px);">Edit Config</a>
+			</p>
+			<p>
+			For help, advice, and updates, <a href="https://discord.gg/AzyBjtQ" target="_blank" style="color: #08c;">join our Discord!</a>
+			</p>
+			<p>
+			<a class="btn player-hidden" href="#" id="button-view-tools" style="margin-top: 3px; margin-right: 7px;">Open Tools List</a>
+			<a class="btn" href="#" id="button-manage-qpi" style="margin-top: 3px;" title="It's like the Roll20 API, but even less useful">Manage QPI Scripts</a>
+			</p>
+			<style id="dynamicStyle"></style>
+		`;
+
+	d20plus.artTabHtml = `
+	<p><a class="btn" href="#" id="button-add-external-art">Manage External Art</a></p>
+	`;
+
+	d20plus.addArtHTML = `
+	<div id="d20plus-artfolder" title="External Art" style="position: relative">
+	<p>Add external images by URL. Any direct link to an image should work.</p>
+	<p>
+	<input placeholder="Name*" id="art-list-add-name">
+	<input placeholder="URL*" id="art-list-add-url">
+	<a class="btn" href="#" id="art-list-add-btn">Add URL</a>
+	<a class="btn" href="#" id="art-list-multi-add-btn">Add Multiple URLs...</a>
+	<p/>
+	<hr>
+	<div id="art-list-container">
+	<input class="search" autocomplete="off" placeholder="Search list..." style="width: 100%;">
+	<br>
+	<p>
+		<span style="display: inline-block; width: 40%; font-weight: bold;">Name</span>
+		<span style="display: inline-block; font-weight: bold;">URL</span>
+	</p>
+	<ul class="list artlist" style="max-height: 600px; overflow-y: scroll; display: block; margin: 0; transform: translateZ(0);"></ul>
+	</div>
+	</div>`;
+
+	d20plus.addArtMassAdderHTML = `
+	<div id="d20plus-artmassadd" title="Mass Add Art URLs">
+	<p>One entry per line; entry format: <b>[name]---[URL (direct link to image)]</b> <a class="btn" href="#" id="art-list-multi-add-btn-submit">Add URLs</a></p>
+	<p><textarea id="art-list-multi-add-area" style="width: 100%; height: 100%; min-height: 500px;" placeholder="My Image---http://pics.me/img1.png"></textarea></p>
+	</div>`;
+
+	d20plus.artListHTML = `
+	<div id="Vetoolsresults">
+	<ol class="dd-list" id="image-search-none"><div class="alert white">No results found in 5etools for those keywords.</div></ol>
+	
+	<ol class="dd-list" id="image-search-has-results">
+		<li class="dd-item dd-folder Vetoolsresult">
+			<div class="dd-content">
+				<div class="folder-title">From 5etools</div>
+			</div>
+	
+			<ol class="dd-list Vetoolsresultfolder" id="custom-art-results"></ol>
+		</li>
+	</ol>
+	</div>`;
+
+	d20plus.configEditorHTML = `
+	<div id="d20plus-configeditor" title="Config Editor" style="position: relative">
+	<!-- populate with js -->
+	</div>`;
+
+	d20plus.configEditorButtonBarHTML = `
+	<div class="ui-dialog-buttonpane ui-widget-content ui-helper-clearfix">
+	<div class="ui-dialog-buttonset">
+		<button type="button" id="configsave" alt="Save" title="Save Config" class="btn" role="button" aria-disabled="false">
+			<span>Save</span>
+		</button>
+	</div>
+	</div>
+	`;
+
+	d20plus.tool.toolsListHtml = `
+		<div id="d20-tools-list" title="Tools List" style="position: relative">
+		<div class="tools-list">
+		<!-- populate with js -->
+		</div>
+		</div>
+		`;
+
+	d20plus.template_TokenEditor = `
+	 <script id='tmpl_tokeneditor' type='text/html'>
+      <div class='dialog largedialog tokeneditor' style='display: block;'>
+        <ul class='nav nav-tabs'>
+          <li class='active'>
+            <a data-tab='basic' href='javascript:void(0);'>Basic</a>
+          </li>
+          <li>
+            <a data-tab='advanced' href='javascript:void(0);'>Advanced</a>
+          </li>
+        </ul>
+        <div class='tab-content'>
+          <div class='basic tab-pane'>
+            <div style='float: left; width: 300px;'>
+              <div style='float: right; margin-right: 85px; font-size: 1.2em; position: relative; top: -4px; cursor: help;'>
+                <a class='showtip pictos' title="You can choose to have the token represent a Character from the Journal. If you do, the token's name, controlling players, and bar values will be based on the Character. Most times you'll just leave this set to None/Generic.">?</a>
+              </div>
+              <label>Represents Character</label>
+              <select class='represents'>
+                <option value=''>None/Generic Token</option>
+                <$ _.each(window.Campaign.activeCharacters(), function(char) { $>
+                <option value="<$!char.id$>"><$!char.get("name")$></option>
+                <$ }); $>
+              </select>
+              <div class='clear'></div>
+              <div style='float: right; margin-right: 75px;'>
+                <label>
+                  <input class='showname' type='checkbox' value='1'>
+                  Show nameplate?
+                </label>
+              </div>
+              <label>Name</label>
+              <input class='name' style='width: 210px;' type='text'>
+              <div class='clear'></div>
+              <label>Controlled By</label>
+              <$ if(this.character) { $>
+              <p>(Determined by Character settings)</p>
+              <$ } else { $>
+              <select class='controlledby chosen' multiple='true'>
+                <option value='all'>All Players</option>
+                <$ window.Campaign.players.each(function(player) { $>
+                <option value="<$!player.id$>"><$!player.get("displayname")$></option>
+                <$ }); $>
+              </select>
+              <$ } $>
+              <div class='clear' style='height: 10px;'></div>
+              <label>
+                Tint Color
+              </label>
+              <input class='tint_color colorpicker' type='text'>
+              <div class='clear'></div>
+            </div>
+            <div style='float: left; width: 300px;'>
+              <label>
+                <span class='bar_color_indicator' style='background-color: <$!window.Campaign.get('bar1_color')$>'></span>
+                Bar 1
+              </label>
+              <div class='clear' style='height: 1px;'></div>
+              <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
+                <input class='bar1_value' type='text'>
+                /
+                <input class='bar1_max' type='text'>
+                <$ if(this.character) { $>
+                <div style='float: right;'>
+                  <select class='bar1_link' style='width: 125px;'>
+                    <option value=''>None</option>
+                    <$ _.each(this.tokensettingsview.availAttribs(), function(attrib) { $>
+                    <option value="<$!attrib.id$>"><$!attrib.name$>
+                    <$ }); $>
+                  </select>
+                  <a class='pictos showtip' style='font-size: 1.2em; position: relative; top: -5px; margin-left: 10px; cursor: help;' title='You can choose an Attribute from the Character this token represents. The values for this bar will be synced to the values of that Attribute.'>?</a>
+                </div>
+                <$ } $>
+              </div>
+              <span style='color: #888;'>(Leave blank for no bar)</span>
+              <div class='clear'></div>
+              <label>
+                <span class='bar_color_indicator' style='background-color: <$!window.Campaign.get('bar2_color')$>'></span>
+                Bar 2
+              </label>
+              <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
+                <input class='bar2_value' type='text'>
+                /
+                <input class='bar2_max' type='text'>
+                <$ if(this.character) { $>
+                <div style='float: right; margin-right: 30px;'>
+                  <select class='bar2_link' style='width: 125px;'>
+                    <option value=''>None</option>
+                    <$ _.each(this.tokensettingsview.availAttribs(), function(attrib) { $>
+                    <option value="<$!attrib.id$>"><$!attrib.name$>
+                    <$ }); $>
+                  </select>
+                </div>
+                <$ } $>
+              </div>
+              <span style='color: #888;'>(Leave blank for no bar)</span>
+              <div class='clear'></div>
+              <label>
+                <span class='bar_color_indicator' style='background-color: <$!window.Campaign.get('bar3_color')$>'></span>
+                Bar 3
+              </label>
+              <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
+                <input class='bar3_value' type='text'>
+                /
+                <input class='bar3_max' type='text'>
+                <$ if(this.character) { $>
+                <div style='float: right; margin-right: 30px;'>
+                  <select class='bar3_link' style='width: 125px;'>
+                    <option value=''>None</option>
+                    <$ _.each(this.tokensettingsview.availAttribs(), function(attrib) { $>
+                    <option value="<$!attrib.id$>"><$!attrib.name$>
+                    <$ }); $>
+                  </select>
+                </div>
+                <$ } $>
+              </div>
+              <span style='color: #888;'>(Leave blank for no bar)</span>
+              <div class='clear' style='height: 10px;'></div>
+              <div style='float: left; width: 130px;'>
+                <div style='float: right;'>
+                  <label>
+                    <input class='aura1_square' type='checkbox'>
+                    Square
+                  </label>
+                </div>
+                <label>
+                  Aura 1
+                </label>
+                <div class='inlineinputs' style='margin-top: 5px;'>
+                  <input class='aura1_radius' type='text'>
+                  <$!window.Campaign.activePage().get("scale_units")$>.
+                  <input class='aura1_color colorpicker' type='text'>
+                </div>
+              </div>
+              <div style='float: left; width: 130px; margin-left: 20px;'>
+                <div style='float: right;'>
+                  <label>
+                    <input class='aura2_square' type='checkbox'>
+                    Square
+                  </label>
+                </div>
+                <label>
+                  Aura 2
+                </label>
+                <div class='inlineinputs' style='margin-top: 5px;'>
+                  <input class='aura2_radius' type='text'>
+                  <$!window.Campaign.activePage().get("scale_units")$>.
+                  <input class='aura2_color colorpicker' type='text'>
+                </div>
+              </div>
+              <div class='clear'></div>
+            </div>
+            <div class='clear'></div>
+            <hr>
+            <h4>
+              GM Notes
+              <span style='font-weight: regular; font-size: 0.9em;'>(Only visible to GMs)</span>
+            </h4>
+            <textarea class='gmnotes summernote'></textarea>
+            <div class='clear'></div>
+            <label>&nbsp;</label>
+          </div>
+          <div class='advanced tab-pane'>
+            <div class='row-fluid'>
+              <div class='span6'>
+                <h4>Player Permissions</h4>
+                <div style='margin-left: 5px;'>
+                  <div class='inlineinputs'>
+                    <label style='width: 40px;'>Name</label>
+                    <label>
+                      <input class='showplayers_name' type='checkbox'>
+                      See
+                    </label>
+                    <label>
+                      <input class='playersedit_name' type='checkbox'>
+                      Edit
+                    </label>
+                  </div>
+                  <div class='clear' style='height: 5px;'></div>
+                  <div class='inlineinputs'>
+                    <label style='width: 40px;'>Bar 1</label>
+                    <label>
+                      <input class='showplayers_bar1' type='checkbox'>
+                      See
+                    </label>
+                    <label>
+                      <input class='playersedit_bar1' type='checkbox'>
+                      Edit
+                    </label>
+                  </div>
+                  <div class='clear' style='height: 5px;'></div>
+                  <div class='inlineinputs'>
+                    <label style='width: 40px;'>Bar 2</label>
+                    <label>
+                      <input class='showplayers_bar2' type='checkbox'>
+                      See
+                    </label>
+                    <label>
+                      <input class='playersedit_bar2' type='checkbox'>
+                      Edit
+                    </label>
+                  </div>
+                  <div class='clear' style='height: 5px;'></div>
+                  <div class='inlineinputs'>
+                    <label style='width: 40px;'>Bar 3</label>
+                    <label>
+                      <input class='showplayers_bar3' type='checkbox'>
+                      See
+                    </label>
+                    <label>
+                      <input class='playersedit_bar3' type='checkbox'>
+                      Edit
+                    </label>
+                  </div>
+                  <div class='clear' style='height: 5px;'></div>
+                  <div class='inlineinputs'>
+                    <label style='width: 40px;'>Aura 1</label>
+                    <label>
+                      <input class='showplayers_aura1' type='checkbox'>
+                      See
+                    </label>
+                    <label>
+                      <input class='playersedit_aura1' type='checkbox'>
+                      Edit
+                    </label>
+                  </div>
+                  <div class='clear' style='height: 5px;'></div>
+                  <div class='inlineinputs'>
+                    <label style='width: 40px;'>Aura 2</label>
+                    <label>
+                      <input class='showplayers_aura2' type='checkbox'>
+                      See
+                    </label>
+                    <label>
+                      <input class='playersedit_aura2' type='checkbox'>
+                      Edit
+                    </label>
+                  </div>
+                  <div class='clear' style='height: 10px;'></div>
+                  <small style='text-align: left; font-size: 0.9em;'>
+                    See: All Players can view
+                    <br>
+                    Edit: Controlling players can view and change
+                  </small>
+                </div>
+                <div class='clear'></div>
+              </div>
+              <div class='span6'>
+                <h4>Emits Light</h4>
+                <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
+                  <input class='light_radius' type='text'>
+                  <$!window.Campaign.activePage().get("scale_units")$>.
+                  <input class='light_dimradius' type='text'>
+                  <$!window.Campaign.activePage().get("scale_units")$>.
+                  <input class='light_angle' placeholder='360' type='text'>
+                  <span style='font-size: 2.0em;'>&deg;</span>
+                </div>
+                <span style='color: #888; padding-left: 5px;'>Light Radius / (optional) Start of Dim / Angle</span>
+                <div class='inlineinputs' style='margin-top: 5px;'>
+                  <label style='margin-left: 7px;'>
+                    <input class='light_otherplayers' type='checkbox'>
+                    All Players See Light
+                  </label>
+                </div>
+                <div class='inlineinputs' style='margin-top: 2px;'>
+                  <label style='margin-left: 7px;'>
+                    <input class='light_hassight' type='checkbox'>
+                    Has Sight
+                  </label>
+                  <span style="margin-left: 9px; margin-right: 28px;">/</span>
+                  Angle:
+                  <input class='light_losangle' placeholder='360' type='text'>
+                  <span style='font-size: 2.0em;'>&deg;</span>
+                </div>
+                <div class='inlineinputs' style='margin-left: 90px; margin-top: 5px;'>
+                  <span style="margin-left: 8px; margin-right: 12px;">/</span>
+                  Multiplyer:
+                  <input class='light_multiplier' placeholder='1.0' style='margin-right: 10px;' type='text'>x</input>
+                </div>
+                <h4>Advanced Fog of War</h4>
+                <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
+                  <input class='advfow_viewdistance' type='text'>
+                  <$!window.Campaign.activePage().get("scale_units")$>.
+                </div>
+                <span style='color: #888; padding-left: 5px;'>View Distance</span>
+                <!-- %h4 -->
+                <!-- Token Actions -->
+                <!-- %a.pictos.showtip(style="margin-left: 15px; cursor: help; font-size: 1.1em; position: relative; top: -2px;" title="Choose from Macros and Abilities of linked Character to show when token is selected") ? -->
+                <!-- %p -->
+                <!-- %strong Add New Token Action: -->
+                <!-- %br -->
+                <!-- %select.chosen(placeholder="Choose from the list...") -->
+                <!-- %option(value="") Choose from the list... -->
+                <!-- <$ if(this.character) { $> -->
+                <!-- <optgroup label="Abilities"> -->
+                <!-- <$ this.character.abilities.each(function(abil) { $> -->
+                <!-- <option value="ability|<$!abil.get('id')$>"><$!abil.get('name')$></option> -->
+                <!-- <$ }); $> -->
+                <!-- </optgroup> -->
+                <!-- <$ } $> -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+	</script>
+	`;
+
+	d20plus.template_pageSettings = `
+	<script id="tmpl_pagesettings" type="text/html">
+		  <label style='padding-top: 4px;'>
+			<strong>Page Size</strong>
+		  </label>
+		  X: <input type="number" class="width" style="width: 50px;" value="<$!this.model.get("width")$>" /> un. (<$!this.model.get("width") * 70$> px)
+		  <div style="margin-left: 110px; margin-top: 2px;">Y: <input type="number" class="height" style="width: 50px;" value="<$!this.model.get("height")$>" /> un. (<$!this.model.get("height") * 70$> px)</div>
+		  <small style='display: block; font-size: 0.9em; margin-left: 110px;'>width by height, 1 unit = 70 pixels</small>
+		  <div class='clear' style='height: 15px;'></div>
+		  <label style='margin-left: 55px; position: relative; top: 6px;'><strong>Scale:</strong> 1 unit =</label>
+		  <input type="number" class="scale_number" style="width: 35px;" value="<$!this.model.get("scale_number")$>" />
+		  <select class='scale_units' style='width: 65px; position: relative;'>
+			<option value='ft'>ft.</option>
+			<option value='m'>m.</option>
+			<option value='km'>km.</option>
+			<option value='mi'>mi.</option>
+			<option value='in'>in.</option>
+			<option value='cm'>cm.</option>
+			<option value='un'>un.</option>
+			<option value='hex'>hex</option>
+			<option value='sq'>sq.</option>
+			<option value='custom'>Custom...</option>
+		  </select>
+		  <div class='hidden' id='custom_scale_units'>
+			<label style='margin-left: 55px; position: relative; top: 6px;'><strong>Custom Unit</strong></label>
+			<input style='width: 60px;' type='text'>
+		  </div>
+		  <div class='clear' style='height: 15px;'></div>
+		  <label>
+			<strong>Background</strong>
+		  </label>
+		  <input class='pagebackground' type='text'>
+		  <hr>
+		  <label style='position: relative; top: 8px;'>
+			<strong>Grid</strong>
+		  </label>
+		  <label class='checkbox'>
+			<input class='gridenabled' type='checkbox' value='1'>
+			Enabled, Size:
+		  </label>
+		  <input type="number" class="snappingincrement" style="width: 35px;" value="<$!this.model.get("snapping_increment")$>" /> units
+		  <div class='clear' style='height: 7px;'></div>
+		  <label style='margin-left: 55px; position: relative; top: 4px;'>Type</label>
+		  <select id='gridtype' style='width: 100px;'>
+			<option selected value='square'>Square</option>
+			<option value='hex'>Hex (V)</option>
+			<option value='hexr'>Hex (H)</option>
+		  </select>
+		  <div class='clear' style='height: 7px;'></div>
+		  <label class='checkbox' id='hexlabels' style='margin-left: 130px;'>
+			<input class='gridlabels' type='checkbox' value='1'>&nbsp; Show Labels</input>
+		  </label>
+		  <div class='clear' style='height: 2px;'></div>
+		  <label style='margin-left: 55px; position: relative; top: 4px;'>
+			<a class='showtip pictos' href='https://wiki.roll20.net/Ruler' target='_blank'>?</a>
+			Measurement
+		  </label>
+		  <select id='diagonaltype' style='width: 100px;'>
+			<option class='squareonly' selected value='foure'>D&D 5E/4E Compatible</option>
+			<option class='squareonly' value='threefive'>Pathfinder/3.5E Compatible</option>
+			<option class='squareonly' value='manhattan'>Manhattan</option>
+			<option class='hexonly' value='hex'>Hex Path</option>
+			<option value='pythagorean'>Euclidean</option>
+		  </select>
+		  <div class='clear' style='height: 10px;'></div>
+		  <label style='margin-left: 55px;'>Color</label>
+		  <input class='gridcolor' type='text'>
+		  <div class='clear' style='height: 7px;'></div>
+		  <label style='margin-left: 55px;'>Opacity</label>
+		  <div class='gridopacity'></div>
+		  <div class='clear' style='height: 10px'></div>
+		  <hr>
+		  <label style='position: relative; top: -2px;'>
+			<strong>Fog of War</strong>
+		  </label>
+		  <label class='checkbox'>
+			<input class='darknessenabled' type='checkbox' value='1'>&nbsp; Enabled</input>
+		  </label>
+		  <hr>
+		  <strong style="display: block;"><i>Requires a paid subscription or all players to use a betteR20 script</i></strong>
+		  <label style='position: relative; top: 3px; width: 85px; padding-left: 15px;'>
+			<strong>Advanced Fog of War</strong>
+		  </label>
+		  <label class='checkbox'>
+			<input class='advancedfowenabled showtip' style='margin-top: 8px; margin-bottom: 8px;' type='checkbox' value='1'>&nbsp; Enabled</input>
+		  </label>
+		  <span class='no_grid' style='display: none;'>
+			, Size:
+			<input type="number" class="advancedfowgridsize" style="width: 30px;" value="<$!this.model.get("adv_fow_grid_size")$>" /> units
+		  </span>
+		  <br>
+		  <label class='checkbox'>
+			<input class='advancedfowshowgrid showtip' title='By default the Advanced Fog of War hides the map grid anywhere revealed but the player can no longer see because of Dynamic Lighting. This option makes the grid always visible.' type='checkbox' value='1'>&nbsp; Show Grid</input>
+		  </label>
+		  <br>
+		  <label class='checkbox' style='margin-left: 110px;'>
+			<input class='dimlightreveals showtip' title='By default the Advanced Fog of War will not be permanently revealed by Dynamic Lighting that is not bright. This option allows dim lighting to also reveal the fog.' type='checkbox' value='1'>&nbsp; Dim Light Reveals</input>
+		  </label>
+		  <br>
+		  <br>
+		  <label style='position: relative; top: -2px;'>
+			<strong>Dynamic Lighting</strong>
+		  </label>
+		  <label class='checkbox'>
+			<input class='lightingenabled showtip' type='checkbox' value='1'>&nbsp; Enabled</input>
+		  </label>
+		  <br>
+		  <label class='checkbox'>
+			<input class='lightenforcelos showtip' title="Player's line of sight set by what tokens they can control." type='checkbox' value='1'>&nbsp; Enforce Line of Sight</input>
+		  </label>
+		  <br>
+		  <br>
+		  <label class='checkbox' style='margin-left: 110px;'>
+			<input class='lightingupdate' type='checkbox' value='1'>&nbsp; Only Update on Drop</input>
+		  </label>
+		  <br>
+		  <label class='checkbox' style='margin-left: 110px;'>
+			<input class='lightrestrictmove' title="Don't allow player tokens to move through Dynamic Lighting walls. Can be enabled even if lighting is not used." type='checkbox' value='1'>&nbsp; Restrict Movement</input>
+		  </label>
+		  <br>
+		  <label class='checkbox' style='margin-left: 110px;'>
+			<input class='lightglobalillum' title='Instead of darkness show light in all places players can see.' type='checkbox' value='1'>&nbsp; Global Illumination</input>
+		  </label>
+		  <hr>
+		  <label style='font-weight: bold;'>GM Opacity</label>
+		  <div class='fogopacity'></div>
+		  <div class='clear'></div>
+		  <hr>
+		  <label style='font-weight: bold;'>Play on Load</label>
+		  <select class='pagejukeboxtrigger' style='width: 180px;'></select>
+		  <div class='clear'></div>
+		  <hr>
+		  <button class='delete btn btn-danger' style='float: right;'>
+			Delete Page
+		  </button>
+		  <button class='archive btn'>
+			Archive Page
+		  </button>
+		  <div class='clear'></div>
+	</script>
+	`;
+
+	d20plus.template_actionsMenu = `
+	 <script id='tmpl_actions_menu' type='text/html'>
+      <div class='actions_menu d20contextmenu'>
+        <ul>
+          <$ if (Object.keys(this).length === 0) { $>
+          <li data-action-type='paste-image'>Paste Image from URL</li>
+          <$ } $>
+          <$ if(this.view && this.view.graphic.type == "image" && this.get("cardid") !== "") { $>
+          <li class='head hasSub' data-action-type='takecard'>Take Card</li>
+          <li class='head hasSub' data-action-type='flipcard'>Flip Card</li>
+          <$ } $>
+          <$ if(window.is_gm) { $>
+          <$ if(this.view && this.get("isdrawing") === false && window.currentEditingLayer != "map") { $>
+          <!-- BEGIN MOD -->
+          <li class='head hasSub' data-menuname='massroll'>
+            Mass Roll &raquo;
+            <ul class='submenu' data-menuname='massroll'>
+              <li class='head hasSub' data-action-type='rollinit'>Initiative</li>
+         	  <li class='head hasSub' data-action-type='rollsaves'>Save</li>
+         	  <li class='head hasSub' data-action-type='rollskills'>Skill</li>
+            </ul>
+          </li>
+          <!-- END MOD -->
+          <li class='head hasSub' data-action-type='addturn'>Add Turn</li>
+          <$ } $>
+          <!-- BEGIN MOD -->
+          <!-- <li class='head'>Edit</li> -->
+          <!-- END MOD -->
+          <$ if(this.view) { $>
+          <li data-action-type='delete'>Delete</li>
+          <li data-action-type='copy'>Copy</li>
+          <$ } $>
+          <li data-action-type='paste'>Paste</li>
+          <li data-action-type='undo'>Undo</li>
+          <$ if(this.view) { $>
+          <li data-action-type='tofront'>To Front</li>
+          <!-- BEGIN MOD -->
+          <li data-action-type='forward-one'>Forward One<!-- (B-F)--></li>
+          <li data-action-type='back-one'>Back One<!-- (B-B)--></li>
+          <!-- END MOD -->
+          <li data-action-type='toback'>To Back</li>
+          <li class='head hasSub' data-menuname='advanced'>
+            Advanced &raquo;
+            <ul class='submenu' data-menuname='advanced'>
+              <li data-action-type='group'>Group</li>
+              <li data-action-type='ungroup'>Ungroup</li>
+              <$ if(this.get("type") == "image") { $>
+              <li class="<$ if (this && this.get("isdrawing")) { $>active<$ } $>" data-action-type="toggledrawing">Is Drawing</li>
+              <li class="<$ if (this && this.get("fliph")) { $>active<$ } $>" data-action-type="togglefliph">Flip Horizontal</li>
+              <li class="<$ if (this && this.get("flipv")) { $>active<$ } $>" data-action-type="toggleflipv">Flip Vertical</li>
+              <li data-action-type='setdimensions'>Set Dimensions</li>
+              <$ if(window.currentEditingLayer == "map") { $>
+              <li data-action-type='aligntogrid'>Align to Grid</li>
+              <$ } $>
+              <li data-action-type='copy-tokenid'>View Token ID</li>
+              <$ } $>
+            </ul>
+          </li>
+          <li class='head hasSub' data-menuname='positioning'>
+            Layer &raquo;
+            <ul class='submenu' data-menuname='positioning'>
+              <li data-action-type="tolayer_map" class='<$ if(this && this.get("layer") == "map") { $>active<$ } $>'>Map Layer</li>
+              <li data-action-type="tolayer_objects" class='<$ if(this && this.get("layer") == "objects") { $>active<$ } $>'>Token Layer</li>
+              <li data-action-type="tolayer_gmlayer" class='<$ if(this && this.get("layer") == "gmlayer") { $>active<$ } $>'>GM Layer</li>
+              <li data-action-type="tolayer_walls" class='<$ if(this && this.get("layer") == "walls") { $>active<$ } $>'>Lighting Layer (will not block LoS)</li>
+            </ul>
+          </li>
+          <$ } $>
+          <$ } $>
+          <$ if(this.view && this.get("sides") !== "" && this.get("cardid") === "") { $>
+          <li class='head hasSub' data-menuname='mutliside'>
+            Multi-Sided &raquo;
+            <ul class='submenu' data-menuname='multiside'>
+              <li data-action-type='side_random'>Random Side</li>
+              <li data-action-type='side_choose'>Choose Side</li>
+              <li data-action-type='rollertokenresize'>Set Side Size</li>
+            </ul>
+          </li>
+          <$ } $>
+        </ul>
+      </div>
+    </script>
+		`;
+
+	d20plus.template_charactereditor = `
+ <script id='tmpl_charactereditor' type='text/html'>
+     <div class='dialog largedialog charactereditor' style='display: block;'>
+        <div class='tab-content'>
+          <div class='bioinfo tab-pane'>
+            <div class='row-fluid'>
+              <div class='span5'>
+                <label>
+                  <strong>Avatar</strong>
+                </label>
+                <$ if(true) { $>
+                <div class="avatar dropbox <$! this.get("avatar") != "" ? "filled" : "" $>" style="width: 95%;">
+                <div class="status"></div>
+                <div class="inner">
+                <$ if(this.get("avatar") == "") { $>
+                <h4 style="padding-bottom: 0px; marigin-bottom: 0px; color: #777;">Drop a file<small>(JPG, PNG, GIF)</small></h4>
+                <br /> or
+                <button class="btn">Choose a file...</button>
+                <input class="manual" type="file" />
+                <$ } else { $>
+                <img src="<$!this.get("avatar")$>" draggable="false" />
+                <div class='remove'><a href='#'>Remove</a></div>
+                <$ } $>
+                </div>
+                </div>
+                <$ } else { $>
+                <div class='avatar'>
+                <$ if(this.get("avatar") != "") { $>
+                <img src="<$!this.get("avatar")$>" draggable="false" />
+                <$ } $>
+                </div>
+                <$ } $>
+                <div class='clear'></div>
+                <!-- BEGIN MOD -->
+                <button class="btn character-image-by-url">Set Image from URL</button>
+                <div class='clear'></div>
+                <!-- END MOD -->
+                <$ if (window.is_gm) { $>
+                <label>
+                  <strong>Default Token (Optional)</strong>
+                </label>
+                <div class="defaulttoken tokenslot <$! this.get("defaulttoken") !== "" ? "filled" : "" $> style="width: 95%;">
+                <$ if(this.get("defaulttoken") !== "") { $>
+                <img src="" draggable="false" />
+                <div class="remove"><a href="#">Remove</a></div>
+                <$ } else { $>
+                <button class="btn">Use Selected Token</button>
+                <small>Select a token on the tabletop to use as the Default Token</small>
+                <$ } $>
+                </div>
+                <!-- BEGIN MOD -->
+                <button class="btn token-image-by-url">Set Token Image from URL</button>
+                <small style="text-align: left;">(Update will only be visible upon re-opening the sheet)</small>
+                <div class='clear'></div>
+                <!-- END MOD -->
+                <$ } $>
+              </div>
+              <div class='span7'>
+                <label>
+                  <strong>Name</strong>
+                </label>
+                <input class='name' type='text'>
+                <div class='clear'></div>
+                <$ if(window.is_gm) { $>
+                <label>
+                  <strong>In Player's Journals</strong>
+                </label>
+                <select class='inplayerjournals chosen' multiple='true' style='width: 100%;'>
+                  <option value="all">All Players</option>
+                  <$ window.Campaign.players.each(function(player) { $>
+                  <option value="<$!player.id$>"><$!player.get("displayname")$></option>
+                  <$ }); $>
+                </select>
+                <div class='clear'></div>
+                <label>
+                  <strong>Can Be Edited &amp; Controlled By</strong>
+                </label>
+                <select class='controlledby chosen' multiple='true' style='width: 100%;'>
+                  <option value="all">All Players</option>
+                  <$ window.Campaign.players.each(function(player) { $>
+                  <option value="<$!player.id$>"><$!player.get("displayname")$></option>
+                  <$ }); $>
+                </select>
+                <div class='clear'></div>
+                <label>
+                  <strong>Tags</strong>
+                </label>
+                <input class='tags'>
+                <div class='clear'></div>
+                <hr>
+                <button class='delete btn btn-danger' style='float: right;'>
+                  Delete
+                </button>
+                <button class='duplicate btn' style='margin-right: 10px;'>
+                  Duplicate
+                </button>
+                <button class='archive btn'>
+                  <$ if(this.get("archived")) { $>Restore from Archive<$ } else { $>Archive<$ } $>
+                </button>
+                <div class='clear'></div>
+                <$ } $>
+                <div class='clear'></div>
+              </div>
+            </div>
+            <div class='row-fluid'>
+              <div class='span12'>
+                <hr>
+                <label>
+                  <strong>Bio & Info</strong>
+                </label>
+                <textarea class='bio'></textarea>
+                <div class='clear'></div>
+                <$ if(window.is_gm) { $>
+                <label>
+                  <strong>GM Notes (Only visible to GM)</strong>
+                </label>
+                <textarea class='gmnotes'></textarea>
+                <div class='clear'></div>
+                <$ } $>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </script>		
+		`;
+
+	d20plus.template_handouteditor = `
+			<script id='tmpl_handouteditor' type='text/html'>
+      <div class='dialog largedialog handouteditor' style='display: block;'>
+        <div class='row-fluid'>
+          <div class='span12'>
+            <label>
+              <strong>Name</strong>
+            </label>
+            <input class='name' type='text'>
+            <div class='clear'></div>
+            <$ if (window.is_gm) { $>
+            <label>
+              <strong>In Player's Journals</strong>
+            </label>
+            <select class='inplayerjournals chosen' multiple='true' style='width: 100%;'>
+              <option value="all">All Players</option>
+              <$ window.Campaign.players.each(function(player) { $>
+              <option value="<$!player.id$>"><$!player.get("displayname")$></option>
+              <$ }); $>
+            </select>
+            <div class='clear'></div>
+            <label>
+              <strong>Can Be Edited By</strong>
+            </label>
+            <select class='controlledby chosen' multiple='true' style='width: 100%;'>
+              <option value="all">All Players</option>
+              <$ window.Campaign.players.each(function(player) { $>
+              <option value="<$!player.id$>"><$!player.get("displayname")$></option>
+              <$ }); $>
+            </select>
+            <div class='clear'></div>
+            <label>
+              <strong>Tags</strong>
+            </label>
+            <input class='tags'>
+            <div class='clear'></div>
+            <$ } $>
+          </div>
+        </div>
+        <div class='row-fluid'>
+          <div class='span12'>
+            <div class="avatar dropbox <$! this.get("avatar") != "" ? "filled" : "" $>">
+            <div class="status"></div>
+            <div class="inner">
+            <$ if(this.get("avatar") == "") { $>
+            <h4 style="padding-bottom: 0px; marigin-bottom: 0px; color: #777;">Drop a file</h4>
+            <br /> or
+            <button class="btn">Choose a file...</button>
+            <input class="manual" type="file" />
+            <$ } else { $>
+            <img src="<$!this.get("avatar")$>" />
+            <div class='remove'><a href='#'>Remove</a></div>
+            <$ } $>
+            </div>
+            </div>
+            <div class='clear'></div>
+          </div>
+        </div>
+        <!-- BEGIN MOD -->
+        <div class='row-fluid'>
+		<button class="btn handout-image-by-url">Set Image from URL</button>
+		<div class='clear'></div>
+		</div>
+		<!-- END MOD -->
+        <div class='row-fluid'>
+          <div class='span12'>
+            <label>
+              <strong>Description & Notes</strong>
+            </label>
+            <textarea class='notes'></textarea>
+            <div class='clear'></div>
+            <$ if(window.is_gm) { $>
+            <label>
+              <strong>GM Notes (Only visible to GM)</strong>
+            </label>
+            <textarea class='gmnotes'></textarea>
+            <div class='clear'></div>
+            <hr>
+            <button class='delete btn btn-danger' style='float: right;'>
+              Delete Handout
+            </button>
+            <button class='archive btn'>
+              <$ if(this.get("archived")) { $>Restore Handout from Archive<$ } else { $>Archive Handout<$ } $>
+            </button>
+            <div class='clear'></div>
+            <$ } $>
+          </div>
+        </div>
+      </div>
+    </script>
+		`;
+};
+
+SCRIPT_EXTENSIONS.push(baseTemplate);
 
 
 const betteR205etools = function () {
@@ -485,8 +7256,8 @@ const betteR205etools = function () {
 		}
 	};
 
-	d20plus.scripts.push({name: "5etoolsrender", url: `${SITE_JS_URL}entryrender.js`});
-	d20plus.scripts.push({name: "5etoolsscalecreature", url: `${SITE_JS_URL}scalecreature.js`});
+	d20plus.js.scripts.push({name: "5etoolsrender", url: `${SITE_JS_URL}entryrender.js`});
+	d20plus.js.scripts.push({name: "5etoolsscalecreature", url: `${SITE_JS_URL}scalecreature.js`});
 
 	d20plus.json = [
 		{name: "class index", url: `${CLASS_DATA_DIR}index.json`},
@@ -500,7 +7271,7 @@ const betteR205etools = function () {
 
 	// add JSON index/metadata
 	d20plus.addJson = function (onLoadFunction) {
-		d20plus.log("Load JSON");
+		d20plus.ut.log("Load JSON");
 		const onEachLoadFunction = function (name, url, data) {
 			if (name === "class index") classDataUrls = data;
 			else if (name === "spell index") spellDataUrls = data;
@@ -514,15 +7285,15 @@ const betteR205etools = function () {
 			}
 			else throw new Error(`Unhandled data from JSON ${name} (${url})`);
 
-			d20plus.log(`JSON [${name}] Loaded`);
+			d20plus.ut.log(`JSON [${name}] Loaded`);
 		};
-		d20plus.chainLoad(d20plus.json, 0, onEachLoadFunction, onLoadFunction);
+		d20plus.js.chainLoad(d20plus.json, 0, onEachLoadFunction, onLoadFunction);
 	};
 
 	d20plus.handleConfigChange = function (isSyncingPlayer) {
-		if (!isSyncingPlayer) d20plus.log("Applying config");
+		if (!isSyncingPlayer) d20plus.ut.log("Applying config");
 		if (window.is_gm) {
-			d20plus.setInitiativeShrink(d20plus.getCfgVal("interface", "minifyTracker"));
+			d20plus.setInitiativeShrink(d20plus.cfg.getCfgVal("interface", "minifyTracker"));
 			d20.Campaign.initiativewindow.rebuildInitiativeList();
 			d20plus.updateDifficulty();
 			if (d20plus.art.refreshList) d20plus.art.refreshList();
@@ -532,9 +7303,9 @@ const betteR205etools = function () {
 // get the user config'd token HP bar
 	d20plus.getCfgHpBarNumber = function () {
 		const bars = [
-			d20plus.getCfgVal("token", "bar1"),
-			d20plus.getCfgVal("token", "bar2"),
-			d20plus.getCfgVal("token", "bar3")
+			d20plus.cfg.getCfgVal("token", "bar1"),
+			d20plus.cfg.getCfgVal("token", "bar2"),
+			d20plus.cfg.getCfgVal("token", "bar3")
 		];
 		return bars[0] === "npc_hpbase" ? 1 : bars[1] === "npc_hpbase" ? 2 : bars[2] === "npc_hpbase" ? 3 : null;
 	};
@@ -564,30 +7335,30 @@ const betteR205etools = function () {
 
 	// Page fully loaded and visible
 	d20plus.Init = function () {
-		d20plus.log("Init (v" + d20plus.version + ")");
-		d20plus.checkVersion();
+		d20plus.ut.log("Init (v" + d20plus.version + ")");
+		d20plus.ut.checkVersion();
 		d20plus.settingsHtmlHeader = `<hr><h3>betteR20-5etools v${d20plus.version}</h3>`;
-        
-		d20plus.log("Modifying character & handout editor templates");
+
+		d20plus.ut.log("Modifying character & handout editor templates");
 		$("#tmpl_charactereditor").html($(d20plus.template_charactereditor).html());
 		$("#tmpl_handouteditor").html($(d20plus.template_handouteditor).html());
 
-		d20plus.addAllCss();
+		d20plus.ut.addAllCss();
 		if (window.is_gm) {
-			d20plus.log("Is GM");
-			d20plus.enhancePageSelector();
+			d20plus.ut.log("Is GM");
+			d20plus.engine.enhancePageSelector();
 		}
-		else d20plus.log("Not GM. Some functionality will be unavailable.");
+		else d20plus.ut.log("Not GM. Some functionality will be unavailable.");
 		d20plus.setSheet();
-		d20plus.addScripts(d20plus.onScriptLoad);
+        d20plus.js.addScripts(d20plus.onScriptLoad);
 
-		d20plus.showLoadingMessage(`betteR20-5etools v${d20plus.version}`);
+		d20plus.ut.showLoadingMessage(`betteR20-5etools v${d20plus.version}`);
 	};
 
 	// continue init once JSON loads
 	d20plus.onScriptLoad = function () {
-		d20plus.initMockApi();
-		d20plus.addApiScripts(d20plus.onApiScriptLoad);
+		d20plus.qpi.initMockApi();
+		d20plus.js.addApiScripts(d20plus.onApiScriptLoad);
 	};
 
 	// continue init once scripts load
@@ -607,53 +7378,55 @@ const betteR205etools = function () {
 		BrewUtil.homebrewMeta = {};
 
 		EntryRenderer.getDefaultRenderer().setBaseUrl(BASE_SITE_URL);
-		if (window.is_gm) d20plus.loadConfig(d20plus.onConfigLoad);
-		else d20plus.loadPlayerConfig(d20plus.onConfigLoad);
+		if (window.is_gm) d20plus.cfg.loadConfig(d20plus.onConfigLoad);
+		else d20plus.cfg.loadPlayerConfig(d20plus.onConfigLoad);
 	};
 
 	// continue more init after config loaded
 	d20plus.onConfigLoad = function () {
-		if (window.is_gm) d20plus.loadArt(d20plus.onArtLoad);
+		if (window.is_gm) d20plus.art.loadArt(d20plus.onArtLoad);
 		else d20plus.onArtLoad();
 	};
 
 	// continue more init after art loaded
 	d20plus.onArtLoad = function () {
 		d20plus.bindDropLocations();
-		d20plus.addHtmlHeader();
+		d20plus.ui.addHtmlHeader();
 		d20plus.addCustomHTML();
-		d20plus.addHtmlFooter();
-		d20plus.enhanceMarkdown();
-		d20plus.addProFeatures();
-		d20plus.initArtFromUrlButtons();
+		d20plus.ui.addHtmlFooter();
+		d20plus.engine.enhanceMarkdown();
+		d20plus.engine.addProFeatures();
+		d20plus.art.initArtFromUrlButtons();
 		if (window.is_gm) {
-			d20plus.addJournalCommands();
-			d20plus.addSelectedTokenCommands();
-			d20plus.addCustomArtSearch();
-			d20plus.baseHandleConfigChange();
+			d20plus.journal.addJournalCommands();
+			d20plus.engine.addSelectedTokenCommands();
+			d20plus.art.addCustomArtSearch();
+			d20plus.cfg.baseHandleConfigChange();
 			d20plus.handleConfigChange();
-			d20plus.addTokenHover();
+			d20plus.engine.addTokenHover();
+			d20plus.engine.enhanceTransmogrifier();
+			d20plus.engine.removeLinkConfirmation();
 		} else {
-			d20plus.startPlayerConfigHandler();
+			d20plus.cfg.startPlayerConfigHandler();
 		}
 		d20.Campaign.pages.each(d20plus.bindGraphics);
 		d20.Campaign.activePage().collection.on("add", d20plus.bindGraphics);
-		d20plus.addSelectedTokenCommands();
-		d20plus.enhanceStatusEffects();
-		d20plus.enhanceMeasureTool();
-		d20plus.enhanceMouseDown();
-		d20plus.enhanceMouseMove();
-		d20plus.addLineCutterTool();
-		d20plus.enhanceChat();
-		d20plus.enhancePathWidths();
-		d20plus.disable3dDice();
-		d20plus.log("All systems operational");
-		d20plus.chatTag(`betteR20-5etools v${d20plus.version}`);
+		d20plus.engine.addSelectedTokenCommands();
+		d20plus.engine.enhanceStatusEffects();
+		d20plus.engine.enhanceMeasureTool();
+		d20plus.engine.enhanceMouseDown();
+		d20plus.engine.enhanceMouseMove();
+		d20plus.engine.addLineCutterTool();
+		d20plus.chat.enhanceChat();
+		d20plus.engine.enhancePathWidths();
+		d20plus.ut.disable3dDice();
+		d20plus.ut.log("All systems operational");
+		d20plus.ut.chatTag(`betteR20-5etools v${d20plus.version}`);
 	};
 
 	// Bind Graphics Add on page
 	d20plus.bindGraphics = function (page) {
-		d20plus.log("Bind Graphics");
+		d20plus.ut.log("Bind Graphics");
 		try {
 			if (page.get("archived") === false) {
 				page.thegraphics.on("add", function (e) {
@@ -667,29 +7440,29 @@ const betteR205etools = function () {
 						var barsList = ["bar1", "bar2", "bar3"];
 						$.each(barsList, (i, barName) => {
 							// PC config keys are suffixed "_pc"
-							const confVal = d20plus.getCfgVal("token", `${barName}${isNPC ? "" : "_pc"}`);
+							const confVal = d20plus.cfg.getCfgVal("token", `${barName}${isNPC ? "" : "_pc"}`);
 							if (confVal) {
 								const charAttr = character.attribs.find(a => a.get("name").toLowerCase() == confVal);
 								if (charAttr) {
 									e.attributes[barName + "_value"] = charAttr.get("current");
-									if (d20plus.hasCfgVal("token", barName + "_max")) {
-										if (d20plus.getCfgVal("token", barName + "_max") && !isNPC && confVal === "hp") { // player HP is current; need to set max to max
+									if (d20plus.cfg.hasCfgVal("token", barName + "_max")) {
+										if (d20plus.cfg.getCfgVal("token", barName + "_max") && !isNPC && confVal === "hp") { // player HP is current; need to set max to max
 											e.attributes[barName + "_max"] = charAttr.get("max");
 										} else {
 											if (isNPC) {
 												// TODO: Setting a value to empty/null does not overwrite existing values on the token.
 												// setting a specific value does. Must figure this out.
-												e.attributes[barName + "_max"] = d20plus.getCfgVal("token", barName + "_max") ? charAttr.get("current") : "";
+												e.attributes[barName + "_max"] = d20plus.cfg.getCfgVal("token", barName + "_max") ? charAttr.get("current") : "";
 											} else {
 												// preserve default token for player tokens
-												if (d20plus.getCfgVal("token", barName + "_max")) {
+												if (d20plus.cfg.getCfgVal("token", barName + "_max")) {
 													e.attributes[barName + "_max"] = charAttr.get("current");
 												}
 											}
 										}
 									}
-									if (d20plus.hasCfgVal("token", barName + "_reveal")) {
-										e.attributes["showplayers_" + barName] = d20plus.getCfgVal("token", barName + "_reveal");
+									if (d20plus.cfg.hasCfgVal("token", barName + "_reveal")) {
+										e.attributes["showplayers_" + barName] = d20plus.cfg.getCfgVal("token", barName + "_reveal");
 									}
 								}
 							}
@@ -698,24 +7471,24 @@ const betteR205etools = function () {
 						// NPC-only settings
 						if (isNPC) {
 							// Set Nametag
-							if (d20plus.hasCfgVal("token", "name")) {
-								e.attributes["showname"] = d20plus.getCfgVal("token", "name");
-								if (d20plus.hasCfgVal("token", "name_reveal")) {
-									e.attributes["showplayers_name"] = d20plus.getCfgVal("token", "name_reveal");
+							if (d20plus.cfg.hasCfgVal("token", "name")) {
+								e.attributes["showname"] = d20plus.cfg.getCfgVal("token", "name");
+								if (d20plus.cfg.hasCfgVal("token", "name_reveal")) {
+									e.attributes["showplayers_name"] = d20plus.cfg.getCfgVal("token", "name_reveal");
 								}
 							}
 
 							// Roll HP
 							// TODO: npc_hpbase appears to be hardcoded here? Refactor for NPC_SHEET_ATTRIBUTES?
-							if ((d20plus.getCfgVal("token", "rollHP") || d20plus.getCfgVal("token", "maximiseHp")) && d20plus.getCfgKey("token", "npc_hpbase")) {
+							if ((d20plus.cfg.getCfgVal("token", "rollHP") || d20plus.cfg.getCfgVal("token", "maximiseHp")) && d20plus.cfg.getCfgKey("token", "npc_hpbase")) {
 								var hpf = character.attribs.find(function (a) {
 									return a.get("name").toLowerCase() == NPC_SHEET_ATTRIBUTES["npc_hpformula"][d20plus.sheet];
 								});
-								var barName = d20plus.getCfgKey("token", "npc_hpbase");
-								var hpformula = hpf.get("current");
+								var barName = d20plus.cfg.getCfgKey("token", "npc_hpbase");
 
-								if (hpformula && hpf) {
-									if (d20plus.getCfgVal("token", "maximiseHp")) {
+								if (hpf && hpf.get("current")) {
+									var hpformula = hpf.get("current");
+									if (d20plus.cfg.getCfgVal("token", "maximiseHp")) {
 										const maxSum = hpformula.replace("d", "*");
 										try {
 											const max = eval(maxSum);
@@ -724,16 +7497,16 @@ const betteR205etools = function () {
 												e.attributes[barName + "_max"] = max;
 											}
 										} catch (error) {
-											d20plus.log("Error Maximising HP");
+											d20plus.ut.log("Error Maximising HP");
 											console.log(error);
 										}
 									} else {
-										d20plus.randomRoll(hpformula, function (result) {
+										d20plus.ut.randomRoll(hpformula, function (result) {
 											e.attributes[barName + "_value"] = result.total;
 											e.attributes[barName + "_max"] = result.total;
-											d20plus.log("Rolled HP for [" + character.get("name") + "]");
+											d20plus.ut.log("Rolled HP for [" + character.get("name") + "]");
 										}, function (error) {
-											d20plus.log("Error Rolling HP Dice");
+											d20plus.ut.log("Error Rolling HP Dice");
 											console.log(error);
 										});
 									}
@@ -915,7 +7688,7 @@ const betteR205etools = function () {
 
 		const madeSoFar = [];
 
-		const root = {i: d20plus.getJournalFolderObj()};
+		const root = {i: d20plus.ut.getJournalFolderObj()};
 
 		// roll20 folder management is dumb, so just pick the first folder with the right name if there's multiple
 		let curDir = root;
@@ -950,7 +7723,7 @@ const betteR205etools = function () {
 		if (!withConfirmation || confirm("Are you sure you want to delete this folder, and everything in it? This cannot be undone.")) {
 			const folder = $(`[data-globalfolderid='${folderId}']`);
 			if (folder.length) {
-				d20plus.log("Nuking folder...");
+				d20plus.ut.log("Nuking folder...");
 				const childItems = folder.find("[data-itemid]").each((i, e) => {
 					const $e = $(e);
 					const itemId = $e.attr("data-itemid");
@@ -978,7 +7751,7 @@ const betteR205etools = function () {
 	d20plus.importer._checkOrRemoveDirByPath = function (doDelete, path) {
 		const parts = d20plus.importer.getCleanPath(path);
 
-		const root = {i: d20plus.getJournalFolderObj()};
+		const root = {i: d20plus.ut.getJournalFolderObj()};
 
 		let curDir = root;
 		for (let i = 0; i < parts.length; ++i) {
@@ -1013,7 +7786,7 @@ const betteR205etools = function () {
 			}
 		}
 
-		const root = {i: d20plus.getJournalFolderObj(), n: "Root", id: "root"};
+		const root = {i: d20plus.ut.getJournalFolderObj(), n: "Root", id: "root"};
 		recurse(root, []);
 		return out;
 	};
@@ -1031,7 +7804,7 @@ const betteR205etools = function () {
 	d20plus.importer._checkOrRemoveFileByPath = function (doDelete, path) {
 		const parts = d20plus.importer.getCleanPath(path);
 
-		const root = {i: d20plus.getJournalFolderObj()};
+		const root = {i: d20plus.ut.getJournalFolderObj()};
 
 		let curDir = root;
 		for (let i = 0; i < parts.length; ++i) {
@@ -1088,12 +7861,12 @@ const betteR205etools = function () {
 				text: "Custom"
 			}));
 
-			const brewUrl = `${HOMEBREW_REPO_URL}contents/${homebrewDir}${d20plus.getAntiCacheSuffix()}&client_id=${HOMEBREW_CLIENT_ID}&client_secret=${HOMEBREW_CLIENT_SECRET}`;
+			const brewUrl = `${HOMEBREW_REPO_URL}contents/${homebrewDir}${d20plus.ut.getAntiCacheSuffix()}&client_id=${HOMEBREW_CLIENT_ID}&client_secret=${HOMEBREW_CLIENT_SECRET}`;
 			DataUtil.loadJSON(brewUrl).then((data, debugUrl) => {
 				if (data.message) console.error(debugUrl, data.message);
 				data.forEach(it => {
 					dropdown.append($('<option>', {
-						value: `${it.download_url}${d20plus.getAntiCacheSuffix()}`,
+						value: `${it.download_url}${d20plus.ut.getAntiCacheSuffix()}`,
 						text: `Homebrew: ${it.name.trim().replace(/\.json$/i, "")}`
 					}));
 				});
@@ -1120,12 +7893,12 @@ const betteR205etools = function () {
 					text: "Custom"
 				}));
 
-				const brewUrl = `${HOMEBREW_REPO_URL}contents/${homebrewDir}${d20plus.getAntiCacheSuffix()}&client_id=${HOMEBREW_CLIENT_ID}&client_secret=${HOMEBREW_CLIENT_SECRET}`;
+				const brewUrl = `${HOMEBREW_REPO_URL}contents/${homebrewDir}${d20plus.ut.getAntiCacheSuffix()}&client_id=${HOMEBREW_CLIENT_ID}&client_secret=${HOMEBREW_CLIENT_SECRET}`;
 				DataUtil.loadJSON(brewUrl).then((data, debugUrl) => {
 					if (data.message) console.error(debugUrl, data.message);
 					data.forEach(it => {
 						$sel.append($('<option>', {
-							value: `${it.download_url}${d20plus.getAntiCacheSuffix()}`,
+							value: `${it.download_url}${d20plus.ut.getAntiCacheSuffix()}`,
 							text: `Homebrew: ${it.name.trim().replace(/\.json$/i, "")}`
 						}));
 					});
@@ -1158,7 +7931,9 @@ const betteR205etools = function () {
 			$wrpSettings.append(d20plus.settingsHtmlPtSubclasses);
 			$wrpSettings.append(d20plus.settingsHtmlPtBackgrounds);
 			$wrpSettings.append(d20plus.settingsHtmlPtOptfeatures);
-			$wrpSettings.append(d20plus.settingsHtmlPtAdventures);
+			const $ptAdventures = $(d20plus.settingsHtmlPtAdventures);
+			$wrpSettings.append($ptAdventures);
+			$ptAdventures.find(`.Vetools-module-tool-open`).click(() => d20plus.tool.get('MODULES').openFn());
 			$wrpSettings.append(d20plus.settingsHtmlPtImportFooter);
 
 			$("#mysettings > .content a#button-monsters-load").on(window.mousedowntype, d20plus.monsters.button);
@@ -1329,7 +8104,7 @@ const betteR205etools = function () {
 				$btnpane.prepend(d20plus.difficultyHtml);
 				$span = $("div#initiativewindow").parent().find(".ui-dialog-buttonpane > span.difficulty");
 			}
-			if (d20plus.getCfgVal("interface", "showDifficulty")) {
+			if (d20plus.cfg.getCfgVal("interface", "showDifficulty")) {
 				$span.text("Difficulty: " + d20plus.getDifficulty());
 				$span.show();
 			} else {
@@ -1400,6 +8175,922 @@ const betteR205etools = function () {
 			});
 		}
 
+		class CharacterAttributesProxy {
+			constructor (character) {
+				this.character = character;
+				this._changedAttrs = [];
+			}
+
+			findByName (attrName) {
+				return this.character.model.attribs.toJSON()
+					.find(a => a.name === attrName) || {};
+			}
+
+			findOrGenerateRepeatingRowId (namePattern, current) {
+				const [namePrefix, nameSuffix] = namePattern.split(/\$\d?/);
+				const attr = this.character.model.attribs.toJSON()
+					.find(a => a.name.startsWith(namePrefix) && a.name.endsWith(nameSuffix) && a.current == current);
+				return attr ?
+					attr.name.replace(RegExp(`^${namePrefix}(.*)${nameSuffix}$`), "$1") :
+					d20plus.ut.generateRowId();
+			}
+
+			add (name, current, max) {
+				this.character.model.attribs.create({
+					name: name,
+					current: current,
+					...(max == undefined ? {} : {max: max})
+				}).save();
+				this._changedAttrs.push(name);
+			}
+
+			addOrUpdate (name, current, max) {
+				const id = this.findByName(name).id;
+				if (id) {
+					this.character.model.attribs.get(id).set({
+						current: current,
+						...(max == undefined ? {} : {max: max})
+					}).save();
+					this._changedAttrs.push(name);
+				} else {
+					this.add(name, current, max);
+				}
+			}
+
+			notifySheetWorkers () {
+				d20.journal.notifyWorkersOfAttrChanges(this.character.model.id, this._changedAttrs);
+				this._changedAttrs = [];
+			}
+		}
+
+		function importFeat (character, data) {
+			const featName = data.name;
+			const featText = data.Vetoolscontent;
+			const attrs = new CharacterAttributesProxy(character);
+			const rowId = d20plus.ut.generateRowId();
+
+			if (d20plus.sheet == "ogl") {
+				attrs.add(`repeating_traits_${rowId}_options-flag`, "0");
+				attrs.add(`repeating_traits_${rowId}_name`, featName);
+				attrs.add(`repeating_traits_${rowId}_description`, featText);
+				attrs.add(`repeating_traits_${rowId}_source`, "Feat");
+			} else if (d20plus.sheet == "shaped") {
+				attrs.add(`repeating_feat_${rowId}_name`, featName);
+				attrs.add(`repeating_feat_${rowId}_content`, featText);
+				attrs.add(`repeating_feat_${rowId}_content_toggle`, "1");
+			} else {
+				console.warn(`Feat import is not supported for ${d20plus.sheet} character sheet`);
+			}
+
+			attrs.notifySheetWorkers();
+		}
+
+		function importBackground (character, data) {
+			const bg = data.Vetoolscontent;
+
+			const renderer = new EntryRenderer();
+			renderer.setBaseUrl(BASE_SITE_URL);
+			const renderStack = [];
+			let feature;
+			bg.entries.forEach(e => {
+				if (e.name && e.name.includes("Feature:")) {
+					feature = JSON.parse(JSON.stringify(e));
+					feature.name = feature.name.replace("Feature:", "").trim();
+				}
+			});
+			if (feature)
+				renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
+			feature.text = renderStack.length ? d20plus.importer.getCleanText(renderStack.join("")) : "";
+
+			const skills = bg.skillProficiencies ? bg.skillProficiencies.split(",").map(s => s.trim()) : [];
+
+			const attrs = new CharacterAttributesProxy(character);
+			const fRowId = d20plus.ut.generateRowId();
+
+			if (d20plus.sheet == "ogl") {
+				attrs.addOrUpdate("background", bg.name);
+
+				attrs.add(`repeating_traits_${fRowId}_name`, bg.name);
+				attrs.add(`repeating_traits_${fRowId}_source`, "Background");
+				attrs.add(`repeating_traits_${fRowId}_source_type`, bg.name);
+				attrs.add(`repeating_traits_${fRowId}_options-flag`, "0");
+				if (feature.text) {
+					attrs.add(`repeating_traits_${fRowId}_description`, feature.text);
+				}
+
+				skills.map(s => s.toLowerCase().replace(/ /g, "_")).forEach(s => {
+					attrs.addOrUpdate(`${s}_prof`, `(@{pb}*@{${s}_type})`);
+				});
+			} else if (d20plus.sheet == "shaped") {
+				attrs.addOrUpdate("background", bg.name);
+				attrs.add(`repeating_trait_${fRowId}_name`, `${feature.name} (${bg.name})`);
+				if (feature.text) {
+					attrs.add(`repeating_trait_${fRowId}_content`, feature.text);
+					attrs.add(`repeating_trait_${fRowId}_content_toggle`, "1");
+				}
+
+				skills.map(s => s.toUpperCase().replace(/ /g, "")).forEach(s => {
+					const rowId = attrs.findOrGenerateRepeatingRowId("repeating_skill_$0_storage_name", s);
+					attrs.addOrUpdate(`repeating_skill_${rowId}_proficiency`, "proficient");
+				});
+			} else {
+				console.warn(`Background import is not supported for ${d20plus.sheet} character sheet`);
+			}
+
+			attrs.notifySheetWorkers();
+		}
+
+		function importRace (character, data) {
+			const race = data.Vetoolscontent;
+
+			race.entries.forEach(e => {
+				const renderer = new EntryRenderer();
+				renderer.setBaseUrl(BASE_SITE_URL);
+				const renderStack = [];
+				renderer.recursiveEntryRender({entries: e.entries}, renderStack);
+				e.text = d20plus.importer.getCleanText(renderStack.join(""));
+			});
+
+			const attrs = new CharacterAttributesProxy(character);
+
+			if (d20plus.sheet == "ogl") {
+				attrs.addOrUpdate(`race`, race.name);
+				attrs.addOrUpdate(`race_display`, race.name);
+				attrs.addOrUpdate(`speed`, Parser.getSpeedString(race));
+
+				race.entries.forEach(e => {
+					const fRowId = d20plus.ut.generateRowId();
+					attrs.add(`repeating_traits_${fRowId}_name`, e.name);
+					attrs.add(`repeating_traits_${fRowId}_source`, "Race");
+					attrs.add(`repeating_traits_${fRowId}_source_type`, race.name);
+					attrs.add(`repeating_traits_${fRowId}_description`, e.text);
+					attrs.add(`repeating_traits_${fRowId}_options-flag`, "0");
+				});
+			} else if (d20plus.sheet == "shaped") {
+				attrs.addOrUpdate("race", race.name);
+				attrs.addOrUpdate("size", Parser.sizeAbvToFull(race.size).toUpperCase());
+				attrs.addOrUpdate("speed_string", Parser.getSpeedString(race));
+
+				if (race.speed instanceof Object) {
+					for (locomotion of ["walk", "burrow", "climb", "fly", "swim"]) {
+						if (race.speed[locomotion]) {
+							const attrName = locomotion == "walk" ? "speed" : `speed_${locomotion}`;
+							if (locomotion != "walk") {
+								attrs.addOrUpdate("other_speeds", "1");
+							}
+							// note: this doesn't cover hover
+							attrs.addOrUpdate(attrName, race.speed[locomotion]);
+						}
+					}
+				} else {
+					attrs.addOrUpdate("speed", race.speed);
+				}
+
+				// really there seems to be only darkvision for PCs
+				for (vision of ["darkvision", "blindsight", "tremorsense", "truesight"]) {
+					if (race[vision]) {
+						attrs.addOrUpdate(vision, race[vision]);
+					}
+				}
+
+				race.entries.forEach(e => {
+					const fRowId = d20plus.ut.generateRowId();
+					attrs.add(`repeating_racialtrait_${fRowId}_name`, e.name);
+					attrs.add(`repeating_racialtrait_${fRowId}_content`, e.text);
+					attrs.add(`repeating_racialtrait_${fRowId}_content_toggle`, "1");
+				});
+
+				const fRowId = d20plus.ut.generateRowId();
+				attrs.add(`repeating_modifier_${fRowId}_name`, race.name);
+				attrs.add(`repeating_modifier_${fRowId}_ability_score_toggle`, "1");
+				Object.keys(race.ability).forEach(abilityAbv => {
+					const value = race.ability[abilityAbv];
+					const ability = Parser.attAbvToFull(abilityAbv).toLowerCase();
+					attrs.add(`repeating_modifier_${fRowId}_${ability}_score_modifier`, value);
+				});
+			} else {
+				console.warn(`Race import is not supported for ${d20plus.sheet} character sheet`);
+			}
+
+			attrs.notifySheetWorkers();
+		}
+
+		function importOptionalFeature (character, data) {
+			const optionalFeature = data.Vetoolscontent;
+			const renderer = new EntryRenderer();
+			renderer.setBaseUrl(BASE_SITE_URL);
+			const rendered = renderer.renderEntry({entries: optionalFeature.entries});
+			const optionalFeatureText = d20plus.importer.getCleanText(rendered);
+
+			const attrs = new CharacterAttributesProxy(character);
+			const fRowId = d20plus.ut.generateRowId();
+
+			if (d20plus.sheet == "ogl") {
+				attrs.add(`repeating_traits_${fRowId}_name`, optionalFeature.name);
+				attrs.add(`repeating_traits_${fRowId}_source`, Parser.optFeatureTypeToFull(optionalFeature.featureType));
+				attrs.add(`repeating_traits_${fRowId}_source_type`, optionalFeature.name);
+				attrs.add(`repeating_traits_${fRowId}_description`, optionalFeatureText);
+				attrs.add(`repeating_traits_${fRowId}_options-flag`, "0");
+			} else if (d20plus.sheet == "shaped") {
+				attrs.add(`repeating_classfeature_${fRowId}_name`, optionalFeature.name);
+				attrs.add(`repeating_classfeature_${fRowId}_content`, optionalFeatureText);
+				attrs.add(`repeating_classfeature_${fRowId}_content_toggle`, "1");
+			} else {
+				console.warn(`Optional feature (invocation, maneuver, or metamagic) import is not supported for ${d20plus.sheet} character sheet`);
+			}
+
+			attrs.notifySheetWorkers();
+		}
+
+		function importClass (character, data) {
+			let levels = d20plus.ut.getNumberRange("What levels?", 1, 20);
+			if (!levels)
+				return;
+
+			const maxLevel = Math.max(...levels);
+
+			const clss = data.Vetoolscontent;
+			const renderer = EntryRenderer.getDefaultRenderer().setBaseUrl(BASE_SITE_URL);
+			const shapedSheetPreFilledFeaturesByClass = {
+				"Artificer": [
+					"Magic Item Analysis",
+					"Tool Expertise",
+					"Wondrous Invention",
+					"Infuse Magic",
+					"Superior Attunement",
+					"Mechanical Servant",
+					"Soul of Artifice",
+				],
+				"Barbarian": [
+					"Rage",
+					"Unarmored Defense",
+					"Reckless Attack",
+					"Danger Sense",
+					"Extra Attack",
+					"Fast Movement",
+					"Feral Instinct",
+					"Brutal Critical",
+					"Relentless Rage",
+					"Persistent Rage",
+					"Indomitable Might",
+					"Primal Champion",
+				],
+				"Bard": [
+					"Bardic Inspiration",
+					"Jack of All Trades",
+					"Song of Rest",
+					"Expertise",
+					"Countercharm",
+					"Magical Secrets",
+					"Superior Inspiration",
+				],
+				"Cleric": [
+					"Channel Divinity",
+					"Turn Undead",
+					"Divine Intervention",
+				],
+				"Druid": [
+					"Druidic",
+					"Wild Shape",
+					"Timeless Body",
+					"Beast Spells",
+					"Archdruid",
+				],
+				"Fighter": [
+					"Fighting Style",
+					"Second Wind",
+					"Action Surge",
+					"Extra Attack",
+					"Indomitable",
+				],
+				"Monk": [
+					"Unarmored Defense",
+					"Martial Arts",
+					"Ki",
+					"Flurry of Blows",
+					"Patient Defense",
+					"Step of the Wind",
+					"Unarmored Movement",
+					"Deflect Missiles",
+					"Slow Fall",
+					"Extra Attack",
+					"Stunning Strike",
+					"Ki-Empowered Strikes",
+					"Evasion",
+					"Stillness of Mind",
+					"Purity of Body",
+					"Tongue of the Sun and Moon",
+					"Diamond Soul",
+					"Timeless Body",
+					"Empty Body",
+					"Perfect Soul",
+				],
+				"Paladin": [
+					"Divine Sense",
+					"Lay on Hands",
+					"Fighting Style",
+					"Divine Smite",
+					"Divine Health",
+					"Channel Divinity",
+					"Extra Attack",
+					"Aura of Protection",
+					"Aura of Courage",
+					"Improved Divine Smite",
+					"Cleansing Touch",
+				],
+				"Ranger": [
+					"Favored Enemy",
+					"Natural Explorer",
+					"Fighting Style",
+					"Primeval Awareness",
+					"Land’s Stride",
+					"Hide in Plain Sight",
+					"Vanish",
+					"Feral Senses",
+					"Foe Slayer",
+				],
+				"Ranger (Revised)": [ // "Ranger UA (2016)"
+					"Favored Enemy",
+					"Natural Explorer",
+					"Fighting Style",
+					"Primeval Awareness",
+					"Greater Favored Enemy",
+					"Fleet of Foot",
+					"Hide in Plain Sight",
+					"Vanish",
+					"Feral Senses",
+					"Foe Slayer",
+				],
+				"Rogue": [
+					"Expertise",
+					"Sneak Attack",
+					"Thieves' Cant",
+					"Cunning Action",
+					"Uncanny Dodge",
+					"Evasion",
+					"Reliable Talent",
+					"Blindsense",
+					"Slippery Mind",
+					"Elusive",
+					"Stroke of Luck",
+				],
+				"Sorcerer": [
+					"Sorcery Points",
+					"Flexible Casting",
+					"Metamagic",
+					"Sorcerous Restoration",
+				],
+				"Warlock": [
+					"Eldritch Invocations",
+					"Pact Boon",
+					"Mystic Arcanum",
+					"Eldritch Master",
+				],
+				"Wizard": [
+					"Arcane Recovery",
+					"Spell Mastery",
+					"Signature Spells",
+				],
+			};
+			const shapedSheetPreFilledFeatures = shapedSheetPreFilledFeaturesByClass[clss.name] || [];
+
+			const attrs = new CharacterAttributesProxy(character);
+
+			importClassGeneral(attrs, clss, maxLevel);
+
+			for (let i = 0; i < maxLevel; i++) {
+				const level = i + 1;
+				if (!levels.has(level)) continue;
+
+				const lvlFeatureList = clss.classFeatures[i];
+				for (let j = 0; j < lvlFeatureList.length; j++) {
+					const feature = lvlFeatureList[j];
+					// don't add "you gain a subclass feature" or ASI's
+					if (!feature.gainSubclassFeature && feature.name !== "Ability Score Improvement") {
+						const renderStack = [];
+						renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
+						feature.text = d20plus.importer.getCleanText(renderStack.join(""));
+						importClassFeature(attrs, clss, level, feature);
+					}
+				}
+			}
+
+			function importClassGeneral (attrs, clss, maxLevel) {
+				if (d20plus.sheet == "ogl") {
+					setTimeout(() => {
+						attrs.addOrUpdate("pb", d20plus.getProfBonusFromLevel(Number(maxLevel)));
+						attrs.addOrUpdate("class", clss.name);
+						attrs.addOrUpdate("level", maxLevel);
+						attrs.addOrUpdate("base_level", String(maxLevel));
+					}, 500);
+				} else if (d20plus.sheet == "shaped") {
+					const isSupportedClass = clss.source == "PHB" || ["Artificer", "Ranger (Revised)"].includes(clss.name);
+					let className = "CUSTOM";
+					if (isSupportedClass) {
+						className = clss.name.toUpperCase();
+						if (clss.name == "Ranger (Revised)")
+							className = "RANGERUA";
+					}
+
+					const fRowId = attrs.findOrGenerateRepeatingRowId("repeating_class_$0_name", className);
+					attrs.addOrUpdate(`repeating_class_${fRowId}_name`, className);
+					attrs.addOrUpdate(`repeating_class_${fRowId}_level`, maxLevel);
+					if (!isSupportedClass) {
+						attrs.addOrUpdate(`repeating_class_${fRowId}_hd`, `d${clss.hd.faces}`);
+						attrs.addOrUpdate(`repeating_class_${fRowId}_custom_class_toggle`, "1");
+						attrs.addOrUpdate(`repeating_class_${fRowId}_custom_name`, clss.name);
+					}
+
+					if (!isSupportedClass && clss.name == "Mystic") {
+						const classResourcesForLevel = clss.classTableGroups[0].rows[maxLevel - 1];
+						const [talentsKnown, disciplinesKnown, psiPoints, psiLimit] = classResourcesForLevel;
+
+						attrs.addOrUpdate("spell_points_name", "PSI");
+						attrs.addOrUpdate("show_spells", "1");
+						attrs.addOrUpdate("spell_points_toggle", "1");
+						attrs.addOrUpdate("spell_ability", "INTELLIGENCE");
+						attrs.addOrUpdate("spell_points_limit", psiLimit);
+						attrs.addOrUpdate("spell_points", psiPoints, psiPoints);
+						talentsKnown, disciplinesKnown;	// unused
+
+						for (let i = 1; i <= 7; i++) {
+							attrs.addOrUpdate(`spell_level_${i}_cost`, i);
+						}
+						for (let i = 0; i <= psiLimit; i++) {
+							attrs.addOrUpdate(`spell_level_filter_${i}`, "1");
+						}
+					}
+
+					attrs.notifySheetWorkers();
+				} else {
+					console.warn(`Class import is not supported for ${d20plus.sheet} character sheet`);
+				}
+			}
+
+			function importClassFeature (attrs, clss, level, feature) {
+				if (d20plus.sheet == "ogl") {
+					const fRowId = d20plus.ut.generateRowId();
+					attrs.add(`repeating_traits_${fRowId}_name`, feature.name);
+					attrs.add(`repeating_traits_${fRowId}_source`, "Class");
+					attrs.add(`repeating_traits_${fRowId}_source_type`, `${clss.name} ${level}`);
+					attrs.add(`repeating_traits_${fRowId}_description`, feature.text);
+					attrs.add(`repeating_traits_${fRowId}_options-flag`, "0");
+				} else if (d20plus.sheet == "shaped") {
+					if (shapedSheetPreFilledFeatures.includes(feature.name))
+						return;
+
+					const fRowId = d20plus.ut.generateRowId();
+					attrs.add(`repeating_classfeature_${fRowId}_name`, `${feature.name} (${clss.name} ${level})`);
+					attrs.add(`repeating_classfeature_${fRowId}_content`, feature.text);
+					attrs.add(`repeating_classfeature_${fRowId}_content_toggle`, "1");
+				}
+
+				attrs.notifySheetWorkers();
+			}
+		}
+
+		function importSubclass (character, data) {
+			if (d20plus.sheet != "ogl" && d20plus.sheet != "shaped") {
+				console.warn(`Subclass import is not supported for ${d20plus.sheet} character sheet`);
+				return;
+			}
+
+			const attrs = new CharacterAttributesProxy(character);
+			const sc = data.Vetoolscontent;
+
+			const desiredIxs = new Set(); // indexes into the subclass feature array
+			const gainLevels = [];
+
+			// _gainAtLevels should be a 20-length array of booleans
+			if (sc._gainAtLevels) {
+				const levels = d20plus.ut.getNumberRange("What levels?", 1, 20);
+				if (levels) {
+					let scFeatureIndex = 0;
+					for (let i = 0; i < 20; i++) {
+						if (sc._gainAtLevels[i]) {
+							if (levels.has(i + 1)) {
+								desiredIxs.add(scFeatureIndex);
+							}
+							scFeatureIndex++;
+							gainLevels.push(i + 1);
+						}
+					}
+				} else {
+					return;
+				}
+			} else {
+				throw new Error("No subclass._gainAtLevels supplied!");
+			}
+
+			if (!desiredIxs.size) {
+				alert("No subclass features were found within the range specified.");
+				return;
+			}
+
+			const renderer = new EntryRenderer();
+			renderer.setBaseUrl(BASE_SITE_URL);
+			let firstFeatures = true;
+			for (let i = 0; i < sc.subclassFeatures.length; i++) {
+				if (!desiredIxs.has(i)) continue;
+
+				const lvlFeatureList = sc.subclassFeatures[i];
+				for (let j = 0; j < lvlFeatureList.length; j++) {
+					const featureCpy = JSON.parse(JSON.stringify(lvlFeatureList[j]));
+					let feature = lvlFeatureList[j];
+
+					try {
+						while (!feature.name || (feature[0] && !feature[0].name)) {
+							if (feature.entries && feature.entries.name) {
+								feature = feature.entries;
+								continue;
+							} else if (feature.entries[0] && feature.entries[0].name) {
+								feature = feature.entries[0];
+								continue;
+							} else {
+								feature = feature.entries;
+							}
+
+							if (!feature) {
+								// in case something goes wrong, reset break the loop
+								feature = featureCpy;
+								break;
+							}
+						}
+					} catch (e) {
+						console.error("Failed to find feature");
+						// in case something goes _really_ wrong, reset
+						feature = featureCpy;
+					}
+
+					// for the first batch of subclass features, try to split them up
+					if (firstFeatures && feature.name && feature.entries) {
+						const subFeatures = [];
+						const baseFeatures = feature.entries.filter(f => {
+							if (f.name && f.type === "entries") {
+								subFeatures.push(f);
+								return false;
+							} else return true;
+						});
+						importSubclassFeature(attrs, sc, gainLevels[i],
+								{name: feature.name, type: feature.type, entries: baseFeatures});
+						subFeatures.forEach(sf => {
+							importSubclassFeature(attrs, sc, gainLevels[i], sf);
+						})
+					} else {
+						importSubclassFeature(attrs, sc, gainLevels[i], feature);
+					}
+
+					firstFeatures = false;
+				}
+			}
+
+			function importSubclassFeature (attrs, sc, level, feature) {
+				const renderStack = [];
+				renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
+				feature.text = d20plus.importer.getCleanText(renderStack.join(""));
+
+				const fRowId = d20plus.ut.generateRowId();
+
+				if (d20plus.sheet == "ogl") {
+					attrs.add(`repeating_traits_${fRowId}_name`, feature.name);
+					attrs.add(`repeating_traits_${fRowId}_source`, "Class");
+					attrs.add(`repeating_traits_${fRowId}_source_type`, `${sc.class} (${sc.name} ${level})`);
+					attrs.add(`repeating_traits_${fRowId}_description`, feature.text);
+					attrs.add(`repeating_traits_${fRowId}_options-flag`, "0");
+				} else if (d20plus.sheet == "shaped") {
+					attrs.add(`repeating_classfeature_${fRowId}_name`, `${feature.name} (${sc.name} ${level})`);
+					attrs.add(`repeating_classfeature_${fRowId}_content`, feature.text);
+					attrs.add(`repeating_classfeature_${fRowId}_content_toggle`, "1");
+				}
+
+				attrs.notifySheetWorkers();
+			}
+		}
+
+		function importPsionicAbility (character, data) {
+			const renderer = new EntryRenderer();
+			renderer.setBaseUrl(BASE_SITE_URL);
+
+			const attrs = new CharacterAttributesProxy(character);
+			data = data.Vetoolscontent;
+			if (!data) {
+				alert("Missing data. Please re-import Psionics.");
+				return;
+			}
+
+			function getCostStr (cost) {
+				return cost.min === cost.max ? cost.min : `${cost.min}-${cost.max}`;
+			}
+
+			function getCleanText (entries) {
+				if (typeof entries == "string") {
+					return d20plus.importer.getCleanText(renderer.renderEntry(entries));
+				} else {
+					const renderStack = [];
+					renderer.recursiveEntryRender({entries: entries}, renderStack, 3);
+					return d20plus.importer.getCleanText(renderStack.join(""));
+				}
+			}
+
+			if (d20plus.sheet == "ogl") {
+				const makeSpellTrait = function (level, rowId, propName, content) {
+					const attrName = `repeating_spell-${level}_${rowId}_${propName}`;
+					attrs.add(attrName, content);
+				}
+
+				// disable all components
+				const noComponents = function (level, rowId, hasM) {
+					makeSpellTrait(level, rowId, "spellcomp_v", 0);
+					makeSpellTrait(level, rowId, "spellcomp_s", 0);
+					if (!hasM) {
+						makeSpellTrait(level, rowId, "spellcomp_m", 0);
+					}
+					makeSpellTrait(level, rowId, "options-flag", 0);
+				}
+
+				if (data.type === "D") {
+					const rowId = d20plus.ut.generateRowId();
+
+					// make focus
+					const focusLevel = "cantrip";
+					makeSpellTrait(focusLevel, rowId, "spelllevel", "cantrip");
+					makeSpellTrait(focusLevel, rowId, "spellname", `${data.name} Focus`);
+					makeSpellTrait(focusLevel, rowId, "spelldescription", getCleanText(data.focus));
+					makeSpellTrait(focusLevel, rowId, "spellcastingtime", "1 bonus action");
+					noComponents(focusLevel, rowId);
+
+					data.modes.forEach(m => {
+						if (m.submodes) {
+							m.submodes.forEach(sm => {
+								const rowId = d20plus.ut.generateRowId();
+								const smLevel = sm.cost.min;
+								makeSpellTrait(smLevel, rowId, "spelllevel", smLevel);
+								makeSpellTrait(smLevel, rowId, "spellname", `${m.name} (${sm.name})`);
+								makeSpellTrait(smLevel, rowId, "spelldescription", getCleanText(sm.entries));
+								makeSpellTrait(smLevel, rowId, "spellcomp_materials", `${getCostStr(sm.cost)} psi points`);
+								noComponents(smLevel, rowId, true);
+							});
+						} else {
+							const rowId = d20plus.ut.generateRowId();
+							const mLevel = m.cost.min;
+							makeSpellTrait(mLevel, rowId, "spelllevel", mLevel);
+							makeSpellTrait(mLevel, rowId, "spellname", `${m.name}`);
+							makeSpellTrait(mLevel, rowId, "spelldescription", `Psionic Discipline mode\n\n${getCleanText(m.entries)}`);
+							makeSpellTrait(mLevel, rowId, "spellcomp_materials", `${getCostStr(m.cost)} psi points`);
+							if (m.concentration) {
+								makeSpellTrait(mLevel, rowId, "spellduration", `${m.concentration.duration} ${m.concentration.unit}`);
+								makeSpellTrait(mLevel, rowId, "spellconcentration", "Yes");
+							}
+							noComponents(mLevel, rowId, true);
+						}
+					});
+				} else {
+					const rowId = d20plus.ut.generateRowId();
+					const level = "cantrip";
+					makeSpellTrait(level, rowId, "spelllevel", "cantrip");
+					makeSpellTrait(level, rowId, "spellname", data.name);
+					makeSpellTrait(level, rowId, "spelldescription", `Psionic Talent\n\n${getCleanText(EntryRenderer.psionic.getTalentText(data, renderer))}`);
+					noComponents(level, rowId, false);
+				}
+			} else if (d20plus.sheet == "shaped") {
+				const makeSpellTrait = function (level, rowId, propName, content) {
+					const attrName = `repeating_spell${level}_${rowId}_${propName}`;
+					attrs.add(attrName, content);
+				}
+
+				const shapedSpellLevel = function (level) {
+					return level ? `${Parser.levelToFull(String(level))}_LEVEL`.toUpperCase() : "CANTRIP";
+				}
+
+				const shapedConcentration = function (conc) {
+					const CONC_ABV_TO_FULL = {
+						rnd: "round",
+						min: "minute",
+						hr: "hour",
+					};
+					return `CONCENTRATION_UP_TO_${conc.duration}_${CONC_ABV_TO_FULL[conc.unit]}${conc.duration > 1 ? "S" : ""}`.toUpperCase();
+				}
+
+				const inferCastingTime = function (content) {
+					if (content.search(/\b(as an action)\b/i) >= 0) {
+						return "1_ACTION";
+					} else if (content.search(/\b(as a bonus action)\b/i) >= 0) {
+						return "1_BONUS_ACTION";
+					} else if (content.search(/\b(as a reaction)\b/i) >= 0) {
+						return "1_REACTION";
+					}
+					return "1_ACTION";
+				}
+
+				const inferDuration = function (content) {
+					let duration, unit, match;
+					if ((match = content.match(/\b(?:for the next|for 1) (round|minute|hour)\b/i))) {
+						[duration, unit] = [1, match[1]];
+					} else if ((match = content.match(/\b(?:for|for the next) (\d+) (minutes|hours|days)\b/i))) {
+						[duration, unit] = [match[1], match[2]];
+					}
+
+					return (duration && unit) ? `${duration}_${unit}`.toUpperCase() : `INSTANTANEOUS`;
+				}
+
+				if (data.type === "D") {
+					const typeStr = `**Psionic Discipline:** ${data.name}\n**Psionic Order:** ${data.order}\n`;
+					const rowId = d20plus.ut.generateRowId();
+
+					// make focus
+					const focusLevel = 0;
+					makeSpellTrait(focusLevel, rowId, "spell_level", shapedSpellLevel(focusLevel));
+					makeSpellTrait(focusLevel, rowId, "name", `${data.name} Focus`);
+					makeSpellTrait(focusLevel, rowId, "content", `${typeStr}\n${getCleanText(data.focus)}`);
+					makeSpellTrait(focusLevel, rowId, "content_toggle", "1");
+					makeSpellTrait(focusLevel, rowId, "casting_time", "1_BONUS_ACTION");
+					makeSpellTrait(focusLevel, rowId, "components", "COMPONENTS_M");
+					makeSpellTrait(focusLevel, rowId, "duration", "SPECIAL");
+
+					data.modes.forEach(m => {
+						const modeContent = `${typeStr}\n${getCleanText(m.entries)}`;
+
+						if (m.submodes) {
+							m.submodes.forEach(sm => {
+								const rowId = d20plus.ut.generateRowId();
+								const smLevel = sm.cost.min;
+								const costStr = getCostStr(sm.cost);
+								const content = `${modeContent}\n${getCleanText(sm.entries)}`;
+								makeSpellTrait(smLevel, rowId, "spell_level", shapedSpellLevel(smLevel));
+								makeSpellTrait(smLevel, rowId, "name", `${m.name} (${sm.name})` + (sm.cost.min < sm.cost.max ? ` (${costStr} psi)` : ""));
+								makeSpellTrait(smLevel, rowId, "content", content);
+								makeSpellTrait(smLevel, rowId, "content_toggle", "1");
+								makeSpellTrait(smLevel, rowId, "casting_time", inferCastingTime(content));
+								makeSpellTrait(smLevel, rowId, "materials", `${costStr} psi points`);
+								makeSpellTrait(smLevel, rowId, "components", "COMPONENTS_M");
+								makeSpellTrait(smLevel, rowId, "duration", inferDuration(content));
+							});
+						} else {
+							const rowId = d20plus.ut.generateRowId();
+							const mLevel = m.cost.min;
+							const costStr = getCostStr(m.cost);
+							makeSpellTrait(mLevel, rowId, "spell_level", shapedSpellLevel(mLevel));
+							makeSpellTrait(mLevel, rowId, "name", m.name + (m.cost.min < m.cost.max ? ` (${costStr} psi)` : ""));
+							makeSpellTrait(mLevel, rowId, "content", modeContent);
+							makeSpellTrait(mLevel, rowId, "content_toggle", "1");
+							makeSpellTrait(mLevel, rowId, "casting_time", inferCastingTime(modeContent));
+							makeSpellTrait(mLevel, rowId, "materials", `${costStr} psi points`);
+							makeSpellTrait(mLevel, rowId, "components", "COMPONENTS_M");
+							if (m.concentration) {
+								makeSpellTrait(mLevel, rowId, "duration", shapedConcentration(m.concentration));
+								makeSpellTrait(mLevel, rowId, "concentration", "Yes");
+							} else {
+								makeSpellTrait(mLevel, rowId, "duration", inferDuration(modeContent));
+							}
+						}
+					});
+				} else {
+					const typeStr = `**Psionic Talent**\n`;
+					const talentContent = `${typeStr}\n${getCleanText(EntryRenderer.psionic.getTalentText(data, renderer))}`;
+					const rowId = d20plus.ut.generateRowId();
+					const level = 0;
+					makeSpellTrait(level, rowId, "spell_level", shapedSpellLevel(level));
+					makeSpellTrait(level, rowId, "name", data.name);
+					makeSpellTrait(level, rowId, "content", talentContent);
+					makeSpellTrait(level, rowId, "content_toggle", "1");
+					makeSpellTrait(level, rowId, "casting_time", inferCastingTime(talentContent));
+					makeSpellTrait(level, rowId, "components", "COMPONENTS_M");
+					makeSpellTrait(level, rowId, "duration", inferDuration(talentContent));
+				}
+			} else {
+				console.warn(`Psionic ability import is not supported for ${d20plus.sheet} character sheet`);
+			}
+
+			attrs.notifySheetWorkers();
+		}
+
+		function importItem (character, data, event) {
+			if (d20plus.sheet == "ogl") {
+				if (data.data._versatile) {
+					setTimeout(() => {
+						const rowId = d20plus.ut.generateRowId();
+
+						function makeItemTrait (key, val) {
+							const toSave = character.model.attribs.create({
+								name: `repeating_attack_${rowId}_${key}`,
+								current: val
+							}).save();
+							toSave.save();
+						}
+
+						const attr = (data.data["Item Type"] || "").includes("Melee") ? "strength" : "dexterity";
+						const attrTag = `@{${attr}_mod}`;
+
+						const proficiencyBonus = character.model.attribs.toJSON().find(it => it.name.includes("pb"));
+						const attrToFind = character.model.attribs.toJSON().find(it => it.name === attr);
+						const attrBonus = attrToFind ? Parser.getAbilityModNumber(Number(attrToFind.current)) : 0;
+
+						// This links the item to the attack, and vice-versa.
+						// Unfortunately, it doesn't work,
+						//   because Roll20 thinks items<->attacks is a 1-to-1 relationship.
+						/*
+						let lastItemId = null;
+						try {
+							const items = character.model.attribs.toJSON().filter(it => it.name.includes("repeating_inventory"));
+							const lastItem = items[items.length - 1];
+							lastItemId = lastItem.name.replace(/repeating_inventory_/, "").split("_")[0];
+
+							// link the inventory item to this attack
+							const toSave = character.model.attribs.create({
+								name: `repeating_inventory_${lastItemId}_itemattackid`,
+								current: rowId
+							});
+							toSave.save();
+						} catch (ex) {
+							console.error("Failed to get last item ID");
+							console.error(ex);
+						}
+
+						if (lastItemId) {
+							makeItemTrait("itemid", lastItemId);
+						}
+						*/
+
+						makeItemTrait("options-flag", "0");
+						makeItemTrait("atkname", data.name);
+						makeItemTrait("dmgbase", data.data._versatile);
+						makeItemTrait("dmgtype", data.data["Damage Type"]);
+						makeItemTrait("atkattr_base", attrTag);
+						makeItemTrait("dmgattr", attrTag);
+						makeItemTrait("rollbase_dmg", `@{wtype}&{template:dmg} {{rname=@{atkname}}} @{atkflag} {{range=@{atkrange}}} @{dmgflag} {{dmg1=[[${data.data._versatile}+${attrBonus}]]}} {{dmg1type=${data.data["Damage Type"]} }} @{dmg2flag} {{dmg2=[[0]]}} {{dmg2type=}} @{saveflag} {{desc=@{atk_desc}}} @{hldmg} {{spelllevel=@{spelllevel}}} {{innate=@{spell_innate}}} {{globaldamage=[[0]]}} {{globaldamagetype=@{global_damage_mod_type}}} @{charname_output}`);
+						makeItemTrait("rollbase_crit", `@{wtype}&{template:dmg} {{crit=1}} {{rname=@{atkname}}} @{atkflag} {{range=@{atkrange}}} @{dmgflag} {{dmg1=[[${data.data._versatile}+${attrBonus}]]}} {{dmg1type=${data.data["Damage Type"]} }} @{dmg2flag} {{dmg2=[[0]]}} {{dmg2type=}} {{crit1=[[${data.data._versatile}]]}} {{crit2=[[0]]}} @{saveflag} {{desc=@{atk_desc}}} @{hldmg}  {{spelllevel=@{spelllevel}}} {{innate=@{spell_innate}}} {{globaldamage=[[0]]}} {{globaldamagecrit=[[0]]}} {{globaldamagetype=@{global_damage_mod_type}}} @{charname_output}`);
+						if (proficiencyBonus) {
+							makeItemTrait("atkbonus", `+${Number(proficiencyBonus.current) + attrBonus}`);
+						}
+						makeItemTrait("atkdmgtype", `${data.data._versatile}${attrBonus > 0 ? `+${attrBonus}` : attrBonus < 0 ? attrBonus : ""} ${data.data["Damage Type"]}`);
+						makeItemTrait("rollbase", "@{wtype}&{template:atk} {{mod=@{atkbonus}}} {{rname=[@{atkname}](~repeating_attack_attack_dmg)}} {{rnamec=[@{atkname}](~repeating_attack_attack_crit)}} {{r1=[[@{d20}cs>@{atkcritrange} + 2[PROF]]]}} @{rtype}cs>@{atkcritrange} + 2[PROF]]]}} {{range=@{atkrange}}} {{desc=@{atk_desc}}} {{spelllevel=@{spelllevel}}} {{innate=@{spell_innate}}} {{globalattack=@{global_attack_mod}}} ammo=@{ammo} @{charname_output}");
+					}, 350); // defer this, so we can hopefully pull item ID
+				}
+
+				// for packs, etc
+				if (data._subItems) {
+					const queue = [];
+					data._subItems.forEach(si => {
+						function makeProp (rowId, propName, content) {
+							character.model.attribs.create({
+								"name": `repeating_inventory_${rowId}_${propName}`,
+								"current": content
+							}).save();
+						}
+
+						if (si.count) {
+							const rowId = d20plus.ut.generateRowId();
+							const siD = typeof si.subItem === "string" ? JSON.parse(si.subItem) : si.subItem;
+
+							makeProp(rowId, "itemname", siD.name);
+							const w = (siD.data || {}).Weight;
+							if (w) makeProp(rowId, "itemweight", w);
+							makeProp(rowId, "itemcontent", Object.entries(siD.data).map(([k, v]) => `${k}: ${v}`).join(", "));
+							makeProp(rowId, "itemcount", String(si.count));
+
+						} else {
+							queue.push(si.subItem);
+						}
+					});
+
+					const interval = d20plus.cfg.getCfgVal("import", "importIntervalHandout") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalHandout");
+					queue.map(it => typeof it === "string" ? JSON.parse(it) : it).forEach((item, ix) => {
+						setTimeout(() => {
+							d20plus.importer.doFakeDrop(event, character, item, null);
+						}, (ix + 1) * interval);
+					});
+
+					return;
+				}
+			}
+
+			// Fallback to native drag-n-drop
+			d20plus.importer.doFakeDrop(event, character, data, null);
+		}
+
+		function importData (character, data, event) {
+			// TODO remove feature import workarounds below when roll20 and sheets supports their drag-n-drop properly
+			if (data.data.Category === "Feats") {
+				importFeat(character, data);
+			} else if (data.data.Category === "Backgrounds") {
+				importBackground(character, data);
+			} else if (data.data.Category === "Races") {
+				importRace(character, data);
+			} else if (data.data.Category === "Optional Features") {
+				importOptionalFeature(character, data);
+			} else if (data.data.Category === "Classes") {
+				importClass(character, data);
+			} else if (data.data.Category === "Subclasses") {
+				importSubclass(character, data);
+			} else if (data.data.Category === "Psionics") {
+				importPsionicAbility(character, data);
+			} else if (data.data.Category === "Items") {
+				importItem(character, data, event);
+			} else {
+				d20plus.importer.doFakeDrop(event, character, data, null);
+			}
+		}
+
 		d20.Campaign.characters.models.each(function (v, i) {
 			v.view.rebindCompendiumDropTargets = function () {
 				// ready character sheet for draggable
@@ -1421,7 +9112,7 @@ const betteR205etools = function () {
 
 								if ($hlpr.hasClass(`player-imported`)) {
 									const data = d20plus.importer.retreivePlayerImport($hlpr.attr("data-playerimportid"));
-									handleData(data);
+									importData(character, data, t);
 								} else {
 									var id = $hlpr.attr("data-itemid");
 									var handout = d20.Campaign.handouts.get(id);
@@ -1431,857 +9122,13 @@ const betteR205etools = function () {
 										handout._getLatestBlob("gmnotes", function (gmnotes) {
 											data = gmnotes;
 											handout.updateBlobs({gmnotes: gmnotes});
-											handleData(JSON.parse(data));
+											importData(character, JSON.parse(data), t);
 										});
 									} else {
 										handout._getLatestBlob("notes", function (notes) {
 											data = $(notes).filter("del").html();
-											handleData(JSON.parse(data));
+											importData(character, JSON.parse(data), t);
 										});
-									}
-								}
-
-								function handleData (data) {
-
-									// TODO remove Feat workaround when roll20 supports feat drag-n-drop properly
-									if (data.data.Category === "Feats") {
-										const rowId = d20plus.generateRowId();
-										character.model.attribs.create({
-											"name": `repeating_feat_${rowId}_content_toggle`,
-											"current": "1"
-										}).save();
-
-										character.model.attribs.create({
-											"name": `repeating_feat_${rowId}_name`,
-											"current": data.name
-										}).save();
-
-										character.model.attribs.create({
-											"name": `repeating_feat_${rowId}_content`,
-											"current": data.Vetoolscontent
-										}).save();
-
-										character.model.attribs.create({
-											"name": `repeating_feat_${rowId}_roll_formula`,
-											"current": "{{content=@{content}}}"
-										}).save();
-
-										character.model.attribs.create({
-											"name": `repeating_feat_${rowId}_toggle_details`,
-											"current": "1"
-										}).save();
-
-										/*
-										character.model.attribs.create({
-											"name": `repeating_traits_${rowId}_source`,
-											"current": "Feat"
-										}).save();
-										*/
-
-										//character.model.view._updateSheetValues();
-										d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_feat_${rowId}_content_toggle`]);
-									} else if (data.data.Category === "Backgrounds") { // TODO remove Background workaround when roll20 supports background drag-n-drop properly
-										const bg = data.Vetoolscontent;
-
-										const renderer = new EntryRenderer();
-										renderer.setBaseUrl(BASE_SITE_URL);
-										const renderStack = [];
-										let feature;
-										bg.entries.forEach(e => {
-											if (e.name && e.name.includes("Feature:")) {
-												feature = JSON.parse(JSON.stringify(e));
-												feature.name = feature.name.replace("Feature:", "").trim();
-											}
-										});
-										if (feature) renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
-
-										d20plus.importer.addOrUpdateAttr(character.model, "background", bg.name);
-
-										const fRowId = d20plus.generateRowId();
-										character.model.attribs.create({
-											name: `repeating_trait_${fRowId}_name`,
-											current: `${feature.name} (${bg.name})`
-										}).save();
-										/*
-										character.model.attribs.create({
-											name: `repeating_traits_${fRowId}_source`,
-											current: "Background"
-										}).save();
-										character.model.attribs.create({
-											name: `repeating_traits_${fRowId}_source_type`,
-											current: bg.name
-										}).save();
-										*/
-										if (renderStack.length) {
-											character.model.attribs.create({
-												name: `repeating_trait_${fRowId}_content_toggle`,
-												current: "1"
-											}).save();
-											character.model.attribs.create({
-												name: `repeating_trait_${fRowId}_content`,
-												current: d20plus.importer.getCleanText(renderStack.join(""))
-											}).save();
-											character.model.attribs.create({
-												name: `repeating_trait_${fRowId}_roll_formula`,
-												current: "{{content=@{content}}}"
-											}).save();
-											character.model.attribs.create({
-												name: `repeating_trait_${fRowId}_toggle_details`,
-												current: "1"
-											}).save();
-										}
-										/*
-										character.model.attribs.create({
-											name: `repeating_traits_${fRowId}_options-flag`,
-											current: "0"
-										}).save();
-										*/
-
-										if (bg.skillProficiencies) {
-											const skills = bg.skillProficiencies.split(",").map(s => s.toUpperCase().trim().replace(/ /g, ""));
-											skills.forEach(s => {
-												var skill_prof_attr_name = character.model.attribs.toJSON()
-													.find(it => it.name.startsWith("repeating_skill_") && it.name.endsWith("_storage_name") && it.current == s)
-													.name.replace(/_storage_name$/, "_proficiency");
-												d20plus.importer.addOrUpdateAttr(character.model, skill_prof_attr_name, "proficient");
-											});
-										}
-
-										//character.model.view._updateSheetValues();
-										d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_trait_${fRowId}_content_toggle`]);
-									} else if (data.data.Category === "Races") { // TODO remove Race workaround when roll20 supports race drag-n-drop properly
-										const race = data.Vetoolscontent;
-
-										console.log(race);
-
-										d20plus.importer.addOrUpdateAttr(character.model, `race`, race.name);
-										d20plus.importer.addOrUpdateAttr(character.model, `size`, Parser.sizeAbvToFull(race.size).toUpperCase());
-
-										//d20plus.importer.addOrUpdateAttr(character.model, `speed`, race.speed.walk);
-										d20plus.importer.addOrUpdateAttr(character.model, `speed_string`, Parser.getSpeedString(race));
-										if (race.speed instanceof Object) {
-											for (locomotion of ["walk", "burrow", "climb", "fly", "swim"]) {
-												if (race.speed[locomotion]) {
-													const attr_name = locomotion == "walk" ? `speed` : `speed_${locomotion}`;
-													if (locomotion != "walk") {
-														d20plus.importer.addOrUpdateAttr(character.model, `other_speeds`, "1");
-													}
-													// TODO cover fly / hover?
-													d20plus.importer.addOrUpdateAttr(character.model, attr_name, race.speed[locomotion]);
-												}
-											}
-										} else {
-											d20plus.importer.addOrUpdateAttr(character.model, `speed`, race.speed);
-										}
-
-										// really there seems to be only darkvision for PCs
-										for (vision of ["darkvision", "blindsight", "tremorsense", "truesight"]) {
-											if (race[vision]) {
-												d20plus.importer.addOrUpdateAttr(character.model, vision, race[vision]);
-											}
-										}
-
-										let newRowIds = [];
-										race.entries.forEach(e => {
-											const renderer = new EntryRenderer();
-											renderer.setBaseUrl(BASE_SITE_URL);
-											const renderStack = [];
-											renderer.recursiveEntryRender({entries: e.entries}, renderStack);
-
-											const fRowId = d20plus.generateRowId();
-											newRowIds.push(fRowId);
-											character.model.attribs.create({
-												name: `repeating_racialtrait_${fRowId}_name`,
-												current: e.name
-											}).save();
-											/*
-											character.model.attribs.create({
-												name: `repeating_traits_${fRowId}_source`,
-												current: "Race"
-											}).save();
-											character.model.attribs.create({
-												name: `repeating_traits_${fRowId}_source_type`,
-												current: race.name
-											}).save();
-											*/
-											character.model.attribs.create({
-												name: `repeating_racialtrait_${fRowId}_content`,
-												current: d20plus.importer.getCleanText(renderStack.join(""))
-											}).save();
-											character.model.attribs.create({
-												name: `repeating_racialtrait_${fRowId}_content_toggle`,
-												current: "1"
-											}).save();
-										});
-
-										const fRowId = d20plus.generateRowId();
-										character.model.attribs.create({
-											name: `repeating_modifier_${fRowId}_name`,
-											current: race.name
-										}).save();
-										character.model.attribs.create({
-											name: `repeating_modifier_${fRowId}_ability_score_toggle`,
-											current: "1"
-										}).save();
-										for (const a in race.ability) {
-											const value = race.ability[a];
-											const ability = Parser.attAbvToFull(a).toLowerCase();
-
-											character.model.attribs.create({
-												name: `repeating_modifier_${fRowId}_${ability}_score_modifier`,
-												current: value
-											}).save();
-										}
-
-										d20.journal.notifyWorkersOfAttrChanges(
-											character.model.id,
-											newRowIds.map(fRowId => `repeating_racialtrait_${fRowId}_content_toggle`)
-												.concat(`repeating_modifier_${fRowId}_ability_score_toggle`)
-										);
-									} else if (data.data.Category === "Optional Features") { // TODO remove Invocation/Optional Feature workaround when roll20 supports invocation drag-n-drop properly
-										const optionalFeature = data.Vetoolscontent;
-										const renderer = new EntryRenderer();
-										renderer.setBaseUrl(BASE_SITE_URL);
-										const rendered = renderer.renderEntry({entries: optionalFeature.entries});
-
-										const fRowId = d20plus.generateRowId();
-										character.model.attribs.create({
-											name: `repeating_classfeature_${fRowId}_name`,
-											current: optionalFeature.name
-										}).save();
-										/*
-										character.model.attribs.create({
-											name: `repeating_traits_${fRowId}_source`,
-											current: Parser.optFeatureTypeToFull(optionalFeature.featureType)
-										}).save();
-										character.model.attribs.create({
-											name: `repeating_traits_${fRowId}_source_type`,
-											current: optionalFeature.name
-										}).save();
-										*/
-										character.model.attribs.create({
-											name: `repeating_classfeature_${fRowId}_content`,
-											current: d20plus.importer.getCleanText(rendered)
-										}).save();
-										character.model.attribs.create({
-											name: `repeating_classfeature_${fRowId}_content_toggle`,
-											current: "1"
-										}).save();
-
-										d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_classfeature_${fRowId}_content_toggle`]);
-									} else if (data.data.Category === "Classes") {
-										let levels = d20plus.getNumberRange("What levels?", 1, 20);
-										if (levels) {
-											const maxLevel = Math.max(...levels);
-
-											const clss = data.Vetoolscontent;
-											console.log(clss);
-
-											/*
-											setTimeout(() => {
-												d20plus.importer.addOrUpdateAttr(character.model, "pb", d20plus.getProfBonusFromLevel(Number(maxLevel)));
-												d20plus.importer.addOrUpdateAttr(character.model, "class", data.name);
-												d20plus.importer.addOrUpdateAttr(character.model, "level", maxLevel);
-												d20plus.importer.addOrUpdateAttr(character.model, "base_level", String(maxLevel));
-											}, 500);
-											*/
-											const is_supported_class = clss.source == "PHB" || ["Artificer", "Ranger (Revised)"].includes(clss.name);
-											let class_name = "CUSTOM";
-											if (is_supported_class) {
-												class_name = clss.name.toUpperCase();
-												if (clss.name == "Ranger (Revised)")
-													class_name = "RANGERUA";
-											}
-
-											const class_name_attr = character.model.attribs.toJSON()
-												.find(it => it.name.startsWith("repeating_class_") && it.name.endsWith("_name") && it.current == class_name);
-
-											const fRowId = class_name_attr ? class_name_attr.name.replace(/^repeating_class_(.*)_name$/, "$1") : d20plus.generateRowId();
-											d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_name`, class_name);
-											d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_level`, maxLevel);
-											if (!is_supported_class) {
-												d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_hd`, `d${clss.hd.faces}`);
-												d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_custom_class_toggle`, "1");
-												d20plus.importer.addOrUpdateAttr(character.model, `repeating_class_${fRowId}_custom_name`, clss.name);
-											}
-											/*
-											character.model.attribs.create({
-												name: `repeating_class_${fRowId}_name`,
-												current: clss.name.toUpperCase()
-											}).save();
-											character.model.attribs.create({
-												name: `repeating_class_${fRowId}_level`,
-												current: maxLevel
-											}).save();
-											*/
-
-											if (!is_supported_class && clss.name == "Mystic") {
-												const classResourcesForLevel = clss.classTableGroups[0].rows[maxLevel - 1];
-												const [talentsKnown, disciplinesKnown, psiPoints, psiLimit] = classResourcesForLevel;
-
-												d20plus.importer.addOrUpdateAttr(character.model, "spell_points_name", "PSI");
-												d20plus.importer.addOrUpdateAttr(character.model, "show_spells", "1");
-												d20plus.importer.addOrUpdateAttr(character.model, "spell_points_toggle", "1");
-												d20plus.importer.addOrUpdateAttr(character.model, "spell_ability", "INTELLIGENCE");
-												d20plus.importer.addOrUpdateAttr(character.model, "spell_points_limit", psiLimit);
-
-												const attrId = d20plus.importer.findAttrId(character.model, "spell_points");
-												if (attrId) {
-													character.model.attribs.get(attrId).set({
-														current: psiPoints,
-														max: psiPoints
-													}).save();
-												} else {
-													character.model.attribs.create({
-														name: "spell_points",
-														current: psiPoints,
-														max: psiPoints
-													}).save();
-												}
-
-												for (let i = 1; i <= 7; i++) {
-													d20plus.importer.addOrUpdateAttr(character.model, `spell_level_${i}_cost`, i);
-												}
-												for (let i = 0; i <= maxLevel; i++) {
-													d20plus.importer.addOrUpdateAttr(character.model, `spell_level_filter_${i}`, "1");
-												}
-											}
-
-											d20.journal.notifyWorkersOfAttrChanges(character.model.id, [`repeating_class_${fRowId}_name`, `repeating_class_${fRowId}_level`]);
-
-											const preFilledFeaturesByClass = {
-												"Artificer": [
-													"Magic Item Analysis",
-													"Tool Expertise",
-													"Wondrous Invention",
-													"Infuse Magic",
-													"Superior Attunement",
-													"Mechanical Servant",
-													"Soul of Artifice",
-												],
-												"Barbarian": [
-													"Rage",
-													"Unarmored Defense",
-													"Reckless Attack",
-													"Danger Sense",
-													"Extra Attack",
-													"Fast Movement",
-													"Feral Instinct",
-													"Brutal Critical",
-													"Relentless Rage",
-													"Persistent Rage",
-													"Indomitable Might",
-													"Primal Champion",
-												],
-												"Bard": [
-													"Bardic Inspiration",
-													"Jack of All Trades",
-													"Song of Rest",
-													"Expertise",
-													"Countercharm",
-													"Magical Secrets",
-													"Superior Inspiration",
-												],
-												"Cleric": [
-													"Channel Divinity",
-													"Turn Undead",
-													"Divine Intervention",
-												],
-												"Druid": [
-													"Druidic",
-													"Wild Shape",
-													"Timeless Body",
-													"Beast Spells",
-													"Archdruid",
-												],
-												"Fighter": [
-													"Fighting Style",
-													"Second Wind",
-													"Action Surge",
-													"Extra Attack",
-													"Indomitable",
-												],
-												"Monk": [
-													"Unarmored Defense",
-													"Martial Arts",
-													"Ki",
-													"Flurry of Blows",
-													"Patient Defense",
-													"Step of the Wind",
-													"Unarmored Movement",
-													"Deflect Missiles",
-													"Slow Fall",
-													"Extra Attack",
-													"Stunning Strike",
-													"Ki-Empowered Strikes",
-													"Evasion",
-													"Stillness of Mind",
-													"Purity of Body",
-													"Tongue of the Sun and Moon",
-													"Diamond Soul",
-													"Timeless Body",
-													"Empty Body",
-													"Perfect Soul",
-												],
-												"Paladin": [
-													"Divine Sense",
-													"Lay on Hands",
-													"Fighting Style",
-													"Divine Smite",
-													"Divine Health",
-													"Channel Divinity",
-													"Extra Attack",
-													"Aura of Protection",
-													"Aura of Courage",
-													"Improved Divine Smite",
-													"Cleansing Touch",
-												],
-												"Ranger": [
-													"Favored Enemy",
-													"Natural Explorer",
-													"Fighting Style",
-													"Primeval Awareness",
-													"Land’s Stride",
-													"Hide in Plain Sight",
-													"Vanish",
-													"Feral Senses",
-													"Foe Slayer",
-												],
-												"Ranger (Revised)": [ // "Ranger UA (2016)"
-													"Favored Enemy",
-													"Natural Explorer",
-													"Fighting Style",
-													"Primeval Awareness",
-													"Greater Favored Enemy",
-													"Fleet of Foot",
-													"Hide in Plain Sight",
-													"Vanish",
-													"Feral Senses",
-													"Foe Slayer",
-												],
-												"Rogue": [
-													"Expertise",
-													"Sneak Attack",
-													"Thieves' Cant",
-													"Cunning Action",
-													"Uncanny Dodge",
-													"Evasion",
-													"Reliable Talent",
-													"Blindsense",
-													"Slippery Mind",
-													"Elusive",
-													"Stroke of Luck",
-												],
-												"Sorcerer": [
-													"Sorcery Points",
-													"Flexible Casting",
-													"Metamagic",
-													"Sorcerous Restoration",
-												],
-												"Warlock": [
-													"Eldritch Invocations",
-													"Pact Boon",
-													"Mystic Arcanum",
-													"Eldritch Master",
-												],
-												"Wizard": [
-													"Arcane Recovery",
-													"Spell Mastery",
-													"Signature Spells",
-												],
-											};
-											const preFilledFeatures = preFilledFeaturesByClass[clss.name] || [];
-
-											let newRowIds = [];
-											const renderer = EntryRenderer.getDefaultRenderer().setBaseUrl(BASE_SITE_URL);
-											for (let i = 0; i < maxLevel; i++) {
-												if (!levels.has(i + 1)) continue;
-
-												const lvlFeatureList = clss.classFeatures[i];
-												for (let j = 0; j < lvlFeatureList.length; j++) {
-													const feature = lvlFeatureList[j];
-													// don't add "you gain a subclass feature" or ASI's
-													if (!feature.gainSubclassFeature && feature.name !== "Ability Score Improvement" && !preFilledFeatures.includes(feature.name)) {
-														const renderStack = [];
-														renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
-
-														const fRowId = d20plus.generateRowId();
-														newRowIds.push(fRowId);
-														character.model.attribs.create({
-															name: `repeating_classfeature_${fRowId}_name`,
-															current: `${feature.name} (${clss.name} ${i + 1})`
-														}).save();
-														/*
-														character.model.attribs.create({
-															name: `repeating_traits_${fRowId}_source`,
-															current: "Class"
-														}).save();
-														character.model.attribs.create({
-															name: `repeating_traits_${fRowId}_source_type`,
-															current: `${clss.name} ${i + 1}`
-														}).save();
-														*/
-														character.model.attribs.create({
-															name: `repeating_classfeature_${fRowId}_content`,
-															current: d20plus.importer.getCleanText(renderStack.join(""))
-														}).save();
-														character.model.attribs.create({
-															name: `repeating_classfeature_${fRowId}_content_toggle`,
-															current: "1"
-														}).save();
-													}
-												}
-											}
-
-											d20.journal.notifyWorkersOfAttrChanges(
-												character.model.id,
-												newRowIds.map(fRowId => `repeating_classfeature_${fRowId}_content_toggle`)
-											);
-										}
-									} else if (data.data.Category === "Subclasses") {
-										const sc = data.Vetoolscontent;
-
-										const desiredIxs = new Set(); // indexes into the subclass feature array
-										const gainLevels = [];
-
-										// _gainAtLevels should be a 20-length array of booleans
-										if (sc._gainAtLevels) {
-											const levels = d20plus.getNumberRange("What levels?", 1, 20);
-											if (levels) {
-												let scFeatureIndex = 0;
-												for (let i = 0; i < 20; i++) {
-													if (sc._gainAtLevels[i]) {
-														if (levels.has(i + 1)) {
-															desiredIxs.add(scFeatureIndex);
-														}
-														scFeatureIndex++;
-														gainLevels.push(i + 1);
-													}
-												}
-											} else {
-												return;
-											}
-										} else {
-											throw new Error("No subclass._gainAtLevels supplied!");
-										}
-
-										if (!desiredIxs.size) {
-											alert("No subclass features were found within the range specified.");
-											return;
-										}
-
-										let newRowIds = [];
-										const renderer = new EntryRenderer();
-										renderer.setBaseUrl(BASE_SITE_URL);
-										let firstFeatures = true;
-										for (let i = 0; i < sc.subclassFeatures.length; i++) {
-											if (!desiredIxs.has(i)) continue;
-
-											const lvlFeatureList = sc.subclassFeatures[i];
-											for (let j = 0; j < lvlFeatureList.length; j++) {
-												const featureCpy = JSON.parse(JSON.stringify(lvlFeatureList[j]));
-												let feature = lvlFeatureList[j];
-
-												try {
-													while (!feature.name || (feature[0] && !feature[0].name)) {
-														if (feature.entries && feature.entries.name) {
-															feature = feature.entries;
-															continue;
-														} else if (feature.entries[0] && feature.entries[0].name) {
-															feature = feature.entries[0];
-															continue;
-														} else {
-															feature = feature.entries;
-														}
-
-														if (!feature) {
-															// in case something goes wrong, reset break the loop
-															feature = featureCpy;
-															break;
-														}
-													}
-												} catch (e) {
-													console.error("Failed to find feature");
-													// in case something goes _really_ wrong, reset
-													feature = featureCpy;
-												}
-
-												// for the first batch of subclass features, try to split them up
-												if (firstFeatures && feature.name && feature.entries) {
-													const subFeatures = [];
-													const baseFeatures = feature.entries.filter(f => {
-														if (f.name && f.type === "entries") {
-															subFeatures.push(f);
-															return false;
-														} else return true;
-													});
-													addFeatureToSheet({name: feature.name, type: feature.type, entries: baseFeatures});
-													subFeatures.forEach(sf => {
-														addFeatureToSheet(sf);
-													})
-												} else {
-													addFeatureToSheet(feature);
-												}
-
-												function addFeatureToSheet (feature) {
-													const renderStack = [];
-													renderer.recursiveEntryRender({entries: feature.entries}, renderStack);
-
-													const fRowId = d20plus.generateRowId();
-													newRowIds.push(fRowId);
-													character.model.attribs.create({
-														name: `repeating_classfeature_${fRowId}_name`,
-														current: `${feature.name} (${sc.name} ${gainLevels[i]})`
-													}).save();
-													/*
-													character.model.attribs.create({
-														name: `repeating_traits_${fRowId}_source`,
-														current: "Class"
-													}).save();
-													character.model.attribs.create({
-														name: `repeating_traits_${fRowId}_source_type`,
-														current: `${sc.class} (${sc.name} ${gainLevels[i]})`
-													}).save();
-													*/
-													character.model.attribs.create({
-														name: `repeating_classfeature_${fRowId}_content`,
-														current: d20plus.importer.getCleanText(renderStack.join(""))
-													}).save();
-													character.model.attribs.create({
-														name: `repeating_classfeature_${fRowId}_content_toggle`,
-														current: "1"
-													}).save();
-												}
-
-												firstFeatures = false;
-											}
-										}
-
-										d20.journal.notifyWorkersOfAttrChanges(
-											character.model.id,
-											newRowIds.map(fRowId => `repeating_classfeature_${fRowId}_content_toggle`)
-										);
-									} else if (data.data.Category === "Psionics") {
-										data = data.Vetoolscontent;
-
-										let newAttrNames = [];
-
-										function makeSpellTrait (level, rowId, propName, content) {
-											const attrName = `repeating_spell${level}_${rowId}_${propName}`;
-											character.model.attribs.create({
-												"name": attrName,
-												"current": `${content}`
-											}).save();
-											newAttrNames.push(attrName);
-										}
-
-										function shapedSpellLevel(level) {
-											return level ? `${Parser.levelToFull(String(level))}_LEVEL`.toUpperCase() : "CANTRIP";
-										}
-
-										function shapedConcentration(conc) {
-											const CONC_ABV_TO_FULL = {
-												rnd: "round",
-												min: "minute",
-												hr: "hour",
-											};
-											return `CONCENTRATION_UP_TO_${conc.duration}_${CONC_ABV_TO_FULL[conc.unit]}${conc.duration > 1 ? "S" : ""}`.toUpperCase();
-										}
-
-										function inferCastingTime(content) {
-											if (content.search(/\b(as an action)\b/i) >= 0) {
-												return "1_ACTION";
-											} else if (content.search(/\b(as a bonus action)\b/i) >= 0) {
-												return "1_BONUS_ACTION";
-											} else if (content.search(/\b(as a reaction)\b/i) >= 0) {
-												return "1_REACTION";
-											}
-											return "1_ACTION";
-										}
-
-										function inferDuration(content) {
-											let duration, unit, match;
-											if (match = content.match(/\b(?:for the next|for 1) (round|minute|hour)\b/i)) {
-												[duration, unit] = [1, match[1]];
-											} else if (match = content.match(/\b(?:for|for the next) (\d+) (minutes|hours|days)\b/i)) {
-												[duration, unit] = [match[1], match[2]];
-											}
-
-											return (duration && unit) ? `${duration}_${unit}`.toUpperCase() : `INSTANTANEOUS`;
-										}
-
-										const renderer = new EntryRenderer();
-										renderer.setBaseUrl(BASE_SITE_URL);
-
-										if (data.type === "D") {
-											const typeStr = `**Psionic Discipline:** ${data.name}\n**Psionic Order:** ${data.order}\n`;
-											const rowId = d20plus.generateRowId();
-
-											// make focus
-											const focusLevel = 0;
-											makeSpellTrait(focusLevel, rowId, "spell_level", shapedSpellLevel(focusLevel));
-											makeSpellTrait(focusLevel, rowId, "name", `${data.name} Focus`);
-											makeSpellTrait(focusLevel, rowId, "content", `${typeStr}\n${d20plus.importer.getCleanText(renderer.renderEntry(data.focus))}`);
-											makeSpellTrait(focusLevel, rowId, "content_toggle", "1");
-											makeSpellTrait(focusLevel, rowId, "casting_time", "1_BONUS_ACTION");
-											makeSpellTrait(focusLevel, rowId, "components", "COMPONENTS_M");
-											makeSpellTrait(focusLevel, rowId, "duration", "SPECIAL");
-
-											data.modes.forEach(m => {
-												const renderStack = [];
-												renderer.recursiveEntryRender({entries: m.entries}, renderStack, 3);
-												const modeContent = `${typeStr}\n${d20plus.importer.getCleanText(renderStack.join(""))}`;
-
-												if (m.submodes) {
-													m.submodes.forEach(sm => {
-														const rowId = d20plus.generateRowId();
-														const smLevel = sm.cost.min;
-														const costStr = sm.cost.min === sm.cost.max ? sm.cost.min : `${sm.cost.min}-${sm.cost.max}`;
-														makeSpellTrait(smLevel, rowId, "spell_level", shapedSpellLevel(smLevel));
-														makeSpellTrait(smLevel, rowId, "name", `${m.name} (${sm.name})` + (sm.cost.min < sm.cost.max ? ` (${costStr} psi)` : ""));
-														const renderStack = [];
-														renderer.recursiveEntryRender({entries: sm.entries}, renderStack, 3);
-														const content = `${modeContent}\n${d20plus.importer.getCleanText(renderStack.join(""))}`;
-														makeSpellTrait(smLevel, rowId, "content", content);
-														makeSpellTrait(smLevel, rowId, "content_toggle", "1");
-														makeSpellTrait(smLevel, rowId, "casting_time", inferCastingTime(content));
-														makeSpellTrait(smLevel, rowId, "materials", `${costStr} psi points`);
-														makeSpellTrait(smLevel, rowId, "components", "COMPONENTS_M");
-														makeSpellTrait(smLevel, rowId, "duration", inferDuration(content));
-													});
-												} else {
-													const rowId = d20plus.generateRowId();
-													const mLevel = m.cost.min;
-													const costStr = m.cost.min === m.cost.max ? m.cost.min : `${m.cost.min}-${m.cost.max}`;
-													makeSpellTrait(mLevel, rowId, "spell_level", shapedSpellLevel(mLevel));
-													makeSpellTrait(mLevel, rowId, "name", m.name + (m.cost.min < m.cost.max ? ` (${costStr} psi)` : ""));
-													makeSpellTrait(mLevel, rowId, "content", modeContent);
-													makeSpellTrait(mLevel, rowId, "content_toggle", "1");
-													makeSpellTrait(mLevel, rowId, "casting_time", inferCastingTime(modeContent));
-													makeSpellTrait(mLevel, rowId, "materials", `${costStr} psi points`);
-													makeSpellTrait(mLevel, rowId, "components", "COMPONENTS_M");
-													if (m.concentration) {
-														makeSpellTrait(mLevel, rowId, "duration", shapedConcentration(m.concentration));
-														makeSpellTrait(mLevel, rowId, "concentration", "Yes");
-													} else {
-														makeSpellTrait(mLevel, rowId, "duration", inferDuration(modeContent));
-													}
-												}
-											});
-										} else {
-											const typeStr = `**Psionic Talent**\n`;
-											const talentContent = `${typeStr}\n${d20plus.importer.getCleanText(EntryRenderer.psionic.getTalentText(data, renderer))}`;
-											const rowId = d20plus.generateRowId();
-											const level = 0;
-											makeSpellTrait(level, rowId, "spell_level", shapedSpellLevel(level));
-											makeSpellTrait(level, rowId, "name", data.name);
-											makeSpellTrait(level, rowId, "content", talentContent);
-											makeSpellTrait(level, rowId, "content_toggle", "1");
-											makeSpellTrait(level, rowId, "casting_time", inferCastingTime(talentContent));
-											makeSpellTrait(level, rowId, "components", "COMPONENTS_M");
-											makeSpellTrait(level, rowId, "duration", inferDuration(talentContent));
-										}
-
-										d20.journal.notifyWorkersOfAttrChanges(character.model.id, newAttrNames);
-									} else if (data.data.Category === "Items") {
-										if (data.data._versatile) {
-											setTimeout(() => {
-												const rowId = d20plus.generateRowId();
-
-												function makeItemTrait (key, val) {
-													const toSave = character.model.attribs.create({
-														name: `repeating_attack_${rowId}_${key}`,
-														current: val
-													}).save();
-													toSave.save();
-												}
-
-												const attr = (data.data["Item Type"] || "").includes("Melee") ? "strength" : "dexterity";
-												const attrTag = `@{${attr}_mod}`;
-
-												const proficiencyBonus = character.model.attribs.toJSON().find(it => it.name.includes("pb"));
-												const attrToFind = character.model.attribs.toJSON().find(it => it.name === attr);
-												const attrBonus = attrToFind ? Parser.getAbilityModNumber(Number(attrToFind.current)) : 0;
-
-												// This links the item to the attack, and vice-versa.
-												// Unfortunately, it doesn't work,
-												//   because Roll20 thinks items<->attacks is a 1-to-1 relationship.
-												/*
-												let lastItemId = null;
-												try {
-													const items = character.model.attribs.toJSON().filter(it => it.name.includes("repeating_inventory"));
-													const lastItem = items[items.length - 1];
-													lastItemId = lastItem.name.replace(/repeating_inventory_/, "").split("_")[0];
-
-													// link the inventory item to this attack
-													const toSave = character.model.attribs.create({
-														name: `repeating_inventory_${lastItemId}_itemattackid`,
-														current: rowId
-													});
-													toSave.save();
-												} catch (ex) {
-													console.error("Failed to get last item ID");
-													console.error(ex);
-												}
-
-												if (lastItemId) {
-													makeItemTrait("itemid", lastItemId);
-												}
-												*/
-
-												makeItemTrait("options-flag", "0");
-												makeItemTrait("atkname", data.name);
-												makeItemTrait("dmgbase", data.data._versatile);
-												makeItemTrait("dmgtype", data.data["Damage Type"]);
-												makeItemTrait("atkattr_base", attrTag);
-												makeItemTrait("dmgattr", attrTag);
-												makeItemTrait("rollbase_dmg", `@{wtype}&{template:dmg} {{rname=@{atkname}}} @{atkflag} {{range=@{atkrange}}} @{dmgflag} {{dmg1=[[${data.data._versatile}+${attrBonus}]]}} {{dmg1type=${data.data["Damage Type"]} }} @{dmg2flag} {{dmg2=[[0]]}} {{dmg2type=}} @{saveflag} {{desc=@{atk_desc}}} @{hldmg} {{spelllevel=@{spelllevel}}} {{innate=@{spell_innate}}} {{globaldamage=[[0]]}} {{globaldamagetype=@{global_damage_mod_type}}} @{charname_output}`);
-												makeItemTrait("rollbase_crit", `@{wtype}&{template:dmg} {{crit=1}} {{rname=@{atkname}}} @{atkflag} {{range=@{atkrange}}} @{dmgflag} {{dmg1=[[${data.data._versatile}+${attrBonus}]]}} {{dmg1type=${data.data["Damage Type"]} }} @{dmg2flag} {{dmg2=[[0]]}} {{dmg2type=}} {{crit1=[[${data.data._versatile}]]}} {{crit2=[[0]]}} @{saveflag} {{desc=@{atk_desc}}} @{hldmg}  {{spelllevel=@{spelllevel}}} {{innate=@{spell_innate}}} {{globaldamage=[[0]]}} {{globaldamagecrit=[[0]]}} {{globaldamagetype=@{global_damage_mod_type}}} @{charname_output}`);
-												if (proficiencyBonus) {
-													makeItemTrait("atkbonus", `+${Number(proficiencyBonus.current) + attrBonus}`);
-												}
-												makeItemTrait("atkdmgtype", `${data.data._versatile}${attrBonus > 0 ? `+${attrBonus}` : attrBonus < 0 ? attrBonus : ""} ${data.data["Damage Type"]}`);
-												makeItemTrait("rollbase", "@{wtype}&{template:atk} {{mod=@{atkbonus}}} {{rname=[@{atkname}](~repeating_attack_attack_dmg)}} {{rnamec=[@{atkname}](~repeating_attack_attack_crit)}} {{r1=[[@{d20}cs>@{atkcritrange} + 2[PROF]]]}} @{rtype}cs>@{atkcritrange} + 2[PROF]]]}} {{range=@{atkrange}}} {{desc=@{atk_desc}}} {{spelllevel=@{spelllevel}}} {{innate=@{spell_innate}}} {{globalattack=@{global_attack_mod}}} ammo=@{ammo} @{charname_output}");
-											}, 350); // defer this, so we can hopefully pull item ID
-										}
-
-										// for packs, etc
-										if (data._subItems) {
-											const queue = [];
-											data._subItems.forEach(si => {
-												function makeProp (rowId, propName, content) {
-													character.model.attribs.create({
-														"name": `repeating_inventory_${rowId}_${propName}`,
-														"current": content
-													}).save();
-												}
-
-												if (si.count) {
-													const rowId = d20plus.generateRowId();
-													const siD = typeof si.subItem === "string" ? JSON.parse(si.subItem) : si.subItem;
-
-													makeProp(rowId, "itemname", siD.name);
-													const w = (siD.data || {}).Weight;
-													if (w) makeProp(rowId, "itemweight", w);
-													makeProp(rowId, "itemcontent", Object.entries(siD.data).map(([k, v]) => `${k}: ${v}`).join(", "));
-													makeProp(rowId, "itemcount", String(si.count));
-
-												} else {
-													queue.push(si.subItem);
-												}
-											});
-
-											const interval = d20plus.getCfgVal("import", "importIntervalHandout") || d20plus.getCfgDefaultVal("import", "importIntervalHandout");
-											queue.map(it => typeof it === "string" ? JSON.parse(it) : it).forEach((item, ix) => {
-												setTimeout(() => {
-													d20plus.importer.doFakeDrop(t, character, item, i);
-												}, (ix + 1) * interval);
-											});
-										} else {
-											d20plus.importer.doFakeDrop(t, character, data, i);
-										}
-									} else {
-										d20plus.importer.doFakeDrop(t, character, data, i);
 									}
 								}
 							} else {
@@ -2326,7 +9173,7 @@ const betteR205etools = function () {
 		const e = characterView; // AKA character.view
 		const n = fakeRoll20Json;
 		// var i = $(outerI.helper[0]).attr("data-pagename"); // always undefined, since we're not using a compendium drag-drop element
-		const i = d20plus.generateRowId();
+		const i = d20plus.ut.generateRowId();
 
 		$(t.target).find("*[accept]").each(function() {
 			$(this).val(undefined);
@@ -2524,7 +9371,8 @@ const betteR205etools = function () {
 							nextStep: d20plus.monsters._doScale
 						}
 					);
-				}
+				},
+				(src) => ({src: src, url: d20plus.monsters.formMonsterUrl(monsterDataUrls[src])})
 			);
 		}
 	};
@@ -2539,11 +9387,11 @@ const betteR205etools = function () {
 		if (character.size === "L") tokensize = 2;
 		if (character.size === "H") tokensize = 3;
 		if (character.size === "G") tokensize = 4;
-		var lightradius = 5;
-		if (character.senses && character.senses.toLowerCase().match(/(darkvision|blindsight|tremorsense|truesight)/)) lightradius = Math.max.apply(Math, character.senses.match(/\d+/g));
+		var lightradius = null;
+		if (character.senses && character.senses.toLowerCase().match(/(darkvision|blindsight|tremorsense|truesight)/)) lightradius = Math.max(...character.senses.match(/\d+/g));
 		var lightmin = 0;
 		if (character.senses && character.senses.toLowerCase().match(/(blindsight|tremorsense|truesight)/)) lightmin = lightradius;
-		const nameSuffix = d20plus.getCfgVal("token", "namesuffix");
+		const nameSuffix = d20plus.cfg.getCfgVal("token", "namesuffix");
 		var defaulttoken = {
 			represents: character.id,
 			name: `${character.name}${nameSuffix ? ` ${nameSuffix}` : ""}`,
@@ -2551,10 +9399,12 @@ const betteR205etools = function () {
 			width: 70 * tokensize,
 			height: 70 * tokensize
 		};
-		if (!d20plus.getCfgVal("import", "skipSenses")) {
+		if (!d20plus.cfg.getCfgVal("import", "skipSenses")) {
 			defaulttoken.light_hassight = true;
-			defaulttoken.light_radius = lightradius;
-			defaulttoken.light_dimradius = lightmin;
+			if (lightradius != null) {
+				defaulttoken.light_radius = lightradius;
+				defaulttoken.light_dimradius = lightmin;
+			}
 		}
 
 		character.updateBlobs({avatar: avatar, defaulttoken: JSON.stringify(defaulttoken)});
@@ -2562,7 +9412,7 @@ const betteR205etools = function () {
 	};
 
 	d20plus.importer.addAction = function (character, name, text, index) {
-		if (d20plus.getCfgVal("token", "tokenactions")) {
+		if (d20plus.cfg.getCfgVal("token", "tokenactions")) {
 			character.abilities.create({
 				name: index + ": " + name,
 				istokenaction: true,
@@ -2570,7 +9420,7 @@ const betteR205etools = function () {
 			}).save();
 		}
 
-		var newRowId = d20plus.generateRowId();
+		var newRowId = d20plus.ut.generateRowId();
 		var actiontext = text;
 		var action_desc = actiontext; // required for later reduction of information dump.
 		var rollbase = d20plus.importer.rollbase();
@@ -2800,7 +9650,7 @@ const betteR205etools = function () {
 									d20plus.importer.getSetAvatarImage(character, `${IMG_URL}blank.png`);
 								},
 								success: function () {
-									d20plus.importer.getSetAvatarImage(character, `${avatar}${d20plus.getAntiCacheSuffix()}`);
+									d20plus.importer.getSetAvatarImage(character, `${avatar}${d20plus.ut.getAntiCacheSuffix()}`);
 								}
 							});
 							const parsedAc = typeof data.ac === "string" ? data.ac : $(`<div>${Parser.acToFull(data.ac)}</div>`).text();
@@ -2843,7 +9693,7 @@ const betteR205etools = function () {
 								current: hpformula != null ? hpformula || "" : ""
 							});
 
-							const hpModId = d20plus.generateRowId();
+							const hpModId = d20plus.ut.generateRowId();
 							character.attribs.create({name: `repeating_hpmod_${hpModId}_source`, current: "CON"});
 							character.attribs.create({name: `repeating_hpmod_${hpModId}_mod`, current: Parser.getAbilityModNumber(data.con)});
 
@@ -2945,7 +9795,7 @@ const betteR205etools = function () {
 							character.attribs.create({name: "npc_senses", current: sensesStr});
 
 							// add Tokenaction Macros
-							if (d20plus.getCfgVal("token", "tokenactionsSkillsSaves")) {
+							if (d20plus.cfg.getCfgVal("token", "tokenactionsSkillsSaves")) {
 								character.abilities.create({
 									name: "Perception",
 									istokenaction: true,
@@ -3007,7 +9857,7 @@ const betteR205etools = function () {
 								// Shaped Sheet currently doesn't correctly load NPC Skills
 								// This adds a visual representation as a Trait for reference
 								if (d20plus.sheet === "shaped") {
-									var newRowId = d20plus.generateRowId();
+									var newRowId = d20plus.ut.generateRowId();
 									character.attribs.create({
 										name: "repeating_npctrait_" + newRowId + "_name",
 										current: "NPC Skills"
@@ -3037,7 +9887,7 @@ const betteR205etools = function () {
 								});
 							}
 							if (data.spellcasting) { // Spellcasting import 2.0
-								const charInterval = d20plus.getCfgVal("import", "importIntervalCharacter") || d20plus.getCfgDefaultVal("import", "importIntervalCharacter");
+								const charInterval = d20plus.cfg.getCfgVal("import", "importIntervalCharacter") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalCharacter");
 								const spAbilsDelayMs = Math.max(350, Math.floor(charInterval / 5));
 
 								// figure out the casting ability or spell DC
@@ -3098,7 +9948,7 @@ const betteR205etools = function () {
 								}
 
 								// add the spellcasting text
-								const newRowId = d20plus.generateRowId();
+								const newRowId = d20plus.ut.generateRowId();
 								const spellTrait = EntryRenderer.monster.getSpellcastingRenderedTraits(data, renderer).map(it => it.rendered).filter(it => it).join("");
 								const cleanDescription = d20plus.importer.getCleanText(spellTrait);
 								setAttrib(`repeating_npctrait_${newRowId}_name`, "Spellcasting");
@@ -3361,7 +10211,7 @@ const betteR205etools = function () {
 										}
 										else if(v["repeating_spell-" + lvl + "_" + spellid + "_includedesc"] && v["repeating_spell-" + lvl + "_" + spellid + "_includedesc"] === "off") {
 											description = "";
-										};
+										}
 										update["repeating_attack_" + attackid + "_atk_desc"] = description;
 
 										// TODO are these necessary?
@@ -3373,7 +10223,7 @@ const betteR205etools = function () {
 									// largely stolen from `create_attack_from_spell`
 									function create_attack_from_spell (lvl, spellid, character_id) {
 										var update = {};
-										var newrowid = d20plus.generateRowId();
+										var newrowid = d20plus.ut.generateRowId();
 										update["repeating_spell-" + lvl + "_" + spellid + "_spellattackid"] = newrowid;
 										update["repeating_spell-" + lvl + "_" + spellid + "_rollcontent"] = "%{" + character_id + "|repeating_attack_" + newrowid + "_attack}";
 										setAttrs(update, update_attack_from_spell(lvl, spellid, newrowid, true));
@@ -3383,8 +10233,9 @@ const betteR205etools = function () {
 									function processDrop (page) {
 										const update = {};
 										const callbacks = [];
-										const id = d20plus.generateRowId();
+										const id = d20plus.ut.generateRowId();
 
+										/* eslint-disable block-spacing, no-extra-semi */
 										var lvl = page.data["Level"] && page.data["Level"] > 0 ? page.data["Level"] : "cantrip";
 										update["repeating_spell-" + lvl + "_" + id + "_spelllevel"] = lvl;
 										if(page.data["spellcasting_ability"]) {
@@ -3437,6 +10288,7 @@ const betteR205etools = function () {
 
 										// custom writing:
 										setAttrs(update, callbacks);
+										/* eslint-enable block-spacing, no-extra-semi */
 									}
 
 									processDrop(data);
@@ -3450,7 +10302,7 @@ const betteR205etools = function () {
 
 										// build tokenaction
 										macroSpells.forEach(mSp => tokenActionStack.push(`[${mSp.name}](~selected|${mSp.identifier})`));
-										if (d20plus.getCfgVal("token", "tokenactionsSpells")) {
+										if (d20plus.cfg.getCfgVal("token", "tokenactionsSpells")) {
 											character.abilities.create({
 												name: "Spells",
 												istokenaction: true,
@@ -3462,13 +10314,13 @@ const betteR205etools = function () {
 							}
 							if (data.trait) {
 								$.each(data.trait, function (i, v) {
-									var newRowId = d20plus.generateRowId();
+									var newRowId = d20plus.ut.generateRowId();
 									character.attribs.create({
 										name: "repeating_npctrait_" + newRowId + "_name",
 										current: d20plus.importer.getCleanText(renderer.renderEntry(v.name))
 									});
 
-									if (d20plus.getCfgVal("token", "tokenactionsTraits")) {
+									if (d20plus.cfg.getCfgVal("token", "tokenactionsTraits")) {
 										const offsetIndex = data.spellcasting ? 1 + i : i;
 										character.abilities.create({
 											name: "Trait" + offsetIndex + ": " + v.name,
@@ -3482,16 +10334,55 @@ const betteR205etools = function () {
 								});
 							}
 							if (data.action) {
+								let offset = 0;
 								$.each(data.action, function (i, v) {
+									const name = d20plus.importer.getCleanText(renderer.renderEntry(v.name));
 									var text = d20plus.importer.getCleanText(renderer.renderEntry({entries: v.entries}, 1));
-									d20plus.importer.addAction(character, d20plus.importer.getCleanText(renderer.renderEntry(v.name)), text, i);
+									if (name === "Hellfire Weapons") {
+										const baseActionEnts = v.entries.filter(it => typeof it === "string");
+										baseActionEnts[0] = "The hellfire engine uses one of the options listed below.";
+										const baseAction = renderer.renderEntry({entries: baseActionEnts}, 1);
+										d20plus.importer.addAction(character, name, d20plus.importer.getCleanText(baseAction), i + offset);
+										offset++;
+
+										v.entries.find(it => it.type === "list").items.forEach(item => {
+											const itemName = d20plus.importer.getCleanText(renderer.renderEntry(item.name));
+											d20plus.importer.addAction(character, itemName, d20plus.importer.getCleanText(renderer.renderEntry({entries: [item.entry]})), i + offset);
+											offset++;
+										});
+
+										offset++;
+									} else if (name === "Eye Rays") {
+										const [base, ...others] = v.entries;
+
+										const baseAction = renderer.renderEntry({entries: [base]}, 1);
+										d20plus.importer.addAction(character, name, d20plus.importer.getCleanText(baseAction), i + offset);
+										offset++;
+
+										const packedOthers = [];
+										others.forEach(it => {
+											const m = /^(\d+\.\s*[^.]+\s*)\.(.*)$/.exec(it);
+											if (m) {
+												const partName = m[1].trim();
+												const text = m[2].trim();
+												packedOthers.push({name: partName, text: text});
+											} else packedOthers[packedOthers.length - 1].text += ` ${it}`;
+										});
+
+										packedOthers.forEach(it => {
+											d20plus.importer.addAction(character, it.name, d20plus.importer.getCleanText(renderer.renderEntry(it.text)), i + offset);
+											offset++;
+										});
+									} else {
+										d20plus.importer.addAction(character, name, text, i + offset);
+									}
 								});
 							}
 							if (data.reaction) {
 								character.attribs.create({name: "reaction_flag", current: 1});
 								character.attribs.create({name: "npcreactionsflag", current: 1});
 								$.each(data.reaction, function (i, v) {
-									var newRowId = d20plus.generateRowId();
+									var newRowId = d20plus.ut.generateRowId();
 									let text = "";
 									character.attribs.create({
 										name: "repeating_npcreaction_" + newRowId + "_name",
@@ -3499,7 +10390,7 @@ const betteR205etools = function () {
 									});
 
 									// roll20 only supports a single reaction, so only use the first
-									if (d20plus.getCfgVal("token", "tokenactions") && i === 0) {
+									if (d20plus.cfg.getCfgVal("token", "tokenactions") && i === 0) {
 										character.abilities.create({
 											name: "Reaction: " + v.name,
 											istokenaction: true,
@@ -3524,9 +10415,9 @@ const betteR205etools = function () {
 								character.attribs.create({name: "npc_legendary_actions", current: legendaryActions.toString()});
 								let tokenactiontext = "";
 								$.each(data.legendary, function (i, v) {
-									var newRowId = d20plus.generateRowId();
+									var newRowId = d20plus.ut.generateRowId();
 
-									if (d20plus.getCfgVal("token", "tokenactions")) {
+									if (d20plus.cfg.getCfgVal("token", "tokenactions")) {
 										tokenactiontext += "[" + v.name + "](~selected|repeating_npcaction-l_$" + i + "_npc_action)\n\r";
 									}
 
@@ -3652,7 +10543,7 @@ const betteR205etools = function () {
 										current: descriptionFlag
 									});
 								});
-								if (d20plus.getCfgVal("token", "tokenactions")) {
+								if (d20plus.cfg.getCfgVal("token", "tokenactions")) {
 									character.abilities.create({
 										name: "Legendary Actions",
 										istokenaction: true,
@@ -3660,9 +10551,9 @@ const betteR205etools = function () {
 									});
 								}
 							}
-							
+
 							// set show/hide NPC names in rolls
-							if (d20plus.hasCfgVal("import", "showNpcNames") && !d20plus.getCfgVal("import", "showNpcNames")) {
+							if (d20plus.cfg.hasCfgVal("import", "showNpcNames") && !d20plus.cfg.getCfgVal("import", "showNpcNames")) {
 								character.attribs.create({name: "npc_name_flag", current: 0});
 							}
 
@@ -3670,7 +10561,7 @@ const betteR205etools = function () {
 
 							if (renderFluff) {
 								setTimeout(() => {
-									const fluffAs = d20plus.getCfgVal("import", "importFluffAs") || d20plus.getCfgDefaultVal("import", "importFluffAs");
+									const fluffAs = d20plus.cfg.getCfgVal("import", "importFluffAs") || d20plus.cfg.getCfgDefaultVal("import", "importFluffAs");
 									let k = fluffAs === "Bio"? "bio" : "gmnotes";
 									character.updateBlobs({
 										[k]: Markdown.parse(renderFluff)
@@ -3681,7 +10572,7 @@ const betteR205etools = function () {
 								}, 500);
 							}
 						} catch (e) {
-							d20plus.log("Error loading [" + name + "]");
+							d20plus.ut.log("Error loading [" + name + "]");
 							d20plus.addImportError(name);
 							console.log(data);
 							console.log(e);
@@ -3846,7 +10737,7 @@ const betteR205etools = function () {
 		}
 		if (d20.journal.customSheets.layouthtml.indexOf("shaped_d20") > 0) d20plus.sheet = "shaped";
 		if (d20.journal.customSheets.layouthtml.indexOf("DnD5e_Character_Sheet") > 0) d20plus.sheet = "community";
-		d20plus.log("Switched Character Sheet Template to " + d20plus.sheet);
+		d20plus.ut.log("Switched Character Sheet Template to " + d20plus.sheet);
 	};
 
 	// Return Initiative Tracker template with formulas
@@ -3863,19 +10754,22 @@ const betteR205etools = function () {
 			$(".tracker-header-extra-columns").empty();
 
 			const cols = [
-				d20plus.getCfgVal("interface", "trackerCol1"),
-				d20plus.getCfgVal("interface", "trackerCol2"),
-				d20plus.getCfgVal("interface", "trackerCol3")
+				d20plus.cfg.getCfgVal("interface", "trackerCol1"),
+				d20plus.cfg.getCfgVal("interface", "trackerCol2"),
+				d20plus.cfg.getCfgVal("interface", "trackerCol3")
 			];
 
 			const headerStack = [];
 			const replaceStack = [
 				// this is hidden by CSS
 				`<span class='cr' alt='CR' title='CR'>
-				<$ if(npc && npc.get("current") == "1") { $>
-					<$!char.attribs.find(function(e) { return e.get("name").toLowerCase() === "npc_challenge" }).get("current")$>
-				<$ } $>
-			</span>`
+					<$ if(npc && npc.get("current") == "1") { $>
+						<$ var crAttr = char.attribs.find(function(e) { return e.get("name").toLowerCase() === "npc_challenge" }); $>
+						<$ if(crAttr) { $>
+							<$!crAttr.get("current")$>
+						<$ } $>
+					<$ } $>
+				</span>`
 			];
 			cols.forEach((c, i) => {
 				switch (c) {
@@ -3933,10 +10827,10 @@ const betteR205etools = function () {
 				}
 			});
 
-			console.log("use custom tracker val was ", d20plus.getCfgVal("interface", "customTracker"))
-			if (d20plus.getCfgVal("interface", "customTracker")) {
+			console.log("use custom tracker val was ", d20plus.cfg.getCfgVal("interface", "customTracker"))
+			if (d20plus.cfg.getCfgVal("interface", "customTracker")) {
 				$(`.init-header`).show();
-				if (d20plus.getCfgVal("interface", "trackerSheetButton")) {
+				if (d20plus.cfg.getCfgVal("interface", "trackerSheetButton")) {
 					$(`.init-sheet-header`).show();
 				} else {
 					$(`.init-sheet-header`).hide();
@@ -3983,7 +10877,7 @@ const betteR205etools = function () {
 			d20plus.initErrorHandler = function (event) {
 				// if we see an error within 250 msec of trying to override the initiative window...
 				if (((new Date).getTime() - startTime) < 250) {
-					d20plus.log("ERROR: failed to populate custom initiative tracker, restoring default...");
+					d20plus.ut.log("ERROR: failed to populate custom initiative tracker, restoring default...");
 					// restore the default functionality
 					$("#tmpl_initiativecharacter").replaceWith(d20plus.turnOrderCachedTemplate);
 					return d20plus.turnOrderCachedFunction();
@@ -3993,11 +10887,11 @@ const betteR205etools = function () {
 			return results;
 		};
 
-		const getTargetWidth = () => d20plus.getCfgVal("interface", "minifyTracker") ? 250 : 350;
+		const getTargetWidth = () => d20plus.cfg.getCfgVal("interface", "minifyTracker") ? 250 : 350;
 		// wider tracker
 		const cachedDialog = d20.Campaign.initiativewindow.$el.dialog;
 		d20.Campaign.initiativewindow.$el.dialog = (...args) => {
-			const widen = d20plus.getCfgVal("interface", "customTracker");
+			const widen = d20plus.cfg.getCfgVal("interface", "customTracker");
 			if (widen && args[0] && args[0].width) {
 				args[0].width = getTargetWidth();
 			}
@@ -4150,7 +11044,7 @@ const betteR205etools = function () {
 	d20plus.spells.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.spells._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 	};
@@ -4293,7 +11187,6 @@ const betteR205etools = function () {
 										src = src.toLowerCase();
 
 
-
 										const subItem = itemList.find(it => n === it.name.toLowerCase() && src === it.source.toLowerCase());
 
 										let count = 1;
@@ -4402,7 +11295,7 @@ const betteR205etools = function () {
 	d20plus.items.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.items._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 	};
@@ -4461,12 +11354,12 @@ const betteR205etools = function () {
 		var reqAttune = data.reqAttune;
 		var attunementstring = "";
 		if (reqAttune) {
-			if (reqAttune === "YES") {
+			if (reqAttune === "(Requires Attunement)") {
 				attunementstring = " (Requires Attunement)";
 			} else if (reqAttune === "OPTIONAL") {
 				attunementstring = " (Attunement Optional)";
 			} else {
-				reqAttune = " (Requires Attunement " + reqAttune + ")";
+				attunementstring = " (Requires Attunement " + reqAttune + ")";
 			}
 		}
 		notecontents += `<p><h3>${data.name}</h3></p><em>${typestring}`;
@@ -4653,7 +11546,7 @@ const betteR205etools = function () {
 	d20plus.psionics.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.psionics._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 	};
@@ -4739,7 +11632,7 @@ const betteR205etools = function () {
 	d20plus.races.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.races._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 	};
@@ -4826,7 +11719,7 @@ const betteR205etools = function () {
 	d20plus.feats.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.feats._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 	};
@@ -4942,7 +11835,7 @@ const betteR205etools = function () {
 					if (data.entries != null) {
 						character.attribs.create({name: "repeating_npctrait_0_name", current: name});
 						character.attribs.create({name: "repeating_npctrait_0_desc", current: data.entries});
-						if (d20plus.getCfgVal("token", "tokenactionsTraits")) {
+						if (d20plus.cfg.getCfgVal("token", "tokenactionsTraits")) {
 							character.abilities.create({
 								name: "Information: " + name,
 								istokenaction: true,
@@ -4968,7 +11861,7 @@ const betteR205etools = function () {
 						const bio = renderer.renderEntry({type: "entries", entries: data.entries});
 
 						setTimeout(() => {
-							const fluffAs = d20plus.getCfgVal("import", "importFluffAs") || d20plus.getCfgDefaultVal("import", "importFluffAs");
+							const fluffAs = d20plus.cfg.getCfgVal("import", "importFluffAs") || d20plus.cfg.getCfgDefaultVal("import", "importFluffAs");
 							let k = fluffAs === "Bio"? "bio" : "gmnotes";
 							character.updateBlobs({
 								[k]: Markdown.parse(bio)
@@ -4979,7 +11872,7 @@ const betteR205etools = function () {
 						}, 500);
 					}
 				} catch (e) {
-					d20plus.log(`Error loading [${name}]`);
+					d20plus.ut.log(`Error loading [${name}]`);
 					d20plus.addImportError(name);
 					console.log(data);
 					console.log(e);
@@ -5009,7 +11902,7 @@ const betteR205etools = function () {
 		const never = "{{normal=1}} {{r2=[[0d20";
 		const always = "{{always=1}} {{r2=[[@{d20}";
 		const query = "{{query=1}} ?{Advantage?|Normal Roll,&#123&#123normal=1&#125&#125 &#123&#123r2=[[0d20|Advantage,&#123&#123advantage=1&#125&#125 &#123&#123r2=[[@{d20}|Disadvantage,&#123&#123disadvantage=1&#125&#125 &#123&#123r2=[[@{d20}}";
-		const desired = d20plus.getCfgVal("import", "advantagemode");
+		const desired = d20plus.cfg.getCfgVal("import", "advantagemode");
 		if (desired) {
 			switch (desired) {
 				case "Toggle (Default Advantage)":
@@ -5032,7 +11925,7 @@ const betteR205etools = function () {
 		// advantagetoggle
 		const advantage = "{{query=1}} {{advantage=1}} {{r2=[[@{d20}";
 		const disadvantage = "{{query=1}} {{disadvantage=1}} {{r2=[[@{d20}";
-		const desired = d20plus.getCfgVal("import", "advantagemode");
+		const desired = d20plus.cfg.getCfgVal("import", "advantagemode");
 		const neither = "";
 		if (desired) {
 			switch (desired) {
@@ -5057,7 +11950,7 @@ const betteR205etools = function () {
 		const never = " ";
 		const always = "/w gm ";
 		const query = "?{Whisper?|Public Roll,|Whisper Roll,/w gm }";
-		const desired = d20plus.getCfgVal("import", "whispermode");
+		const desired = d20plus.cfg.getCfgVal("import", "whispermode");
 		if (desired) {
 			switch (desired) {
 				case "Toggle (Default GM)":
@@ -5079,7 +11972,7 @@ const betteR205etools = function () {
 		// whispertoggle
 		const gm = "/w gm ";
 		const pblic = " ";
-		const desired = d20plus.getCfgVal("import", "whispermode");
+		const desired = d20plus.cfg.getCfgVal("import", "whispermode");
 		if (desired) {
 			switch (desired) {
 				case "Toggle (Default GM)":
@@ -5102,7 +11995,7 @@ const betteR205etools = function () {
 		// dtype
 		const on = "full";
 		const off = "pick";
-		const desired = d20plus.getCfgVal("import", "damagemode");
+		const desired = d20plus.cfg.getCfgVal("import", "damagemode");
 		if (desired) {
 			switch (desired) {
 				case "Auto Roll":
@@ -5163,7 +12056,7 @@ const betteR205etools = function () {
 		const name = data.name;
 		d20.Campaign.handouts.create({
 			name: name,
-			tags:  d20plus.importer.getTagString([
+			tags: d20plus.importer.getTagString([
 				Parser.sourceJsonToFull(data.source)
 			], "class")
 		}, {
@@ -5226,7 +12119,7 @@ const betteR205etools = function () {
 	d20plus.classes.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.classes._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 
@@ -5304,7 +12197,7 @@ const betteR205etools = function () {
 	d20plus.subclasses._preloadClass = function (subclass) {
 		if (!subclass.class) Promise.resolve();
 
-		d20plus.log("Preloading class...");
+		d20plus.ut.log("Preloading class...");
 		return DataUtil.class.loadJSON(BASE_SITE_URL).then((data) => {
 			const clazz = data.class.find(it => it.name.toLowerCase() === subclass.class.toLowerCase() && it.source.toLowerCase() === (subclass.classSource || SRC_PHB).toLowerCase());
 			if (!clazz) {
@@ -5350,7 +12243,7 @@ const betteR205etools = function () {
 		d20plus.subclasses._preloadClass(data).then(() => {
 			const [notecontents, gmnotes] = d20plus.subclasses._getHandoutData(data);
 
-			const importId = d20plus.generateRowId();
+			const importId = d20plus.ut.generateRowId();
 			d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 			const name = `${data.class ? `${data.class} \u2014 ` : ""}${data.name}`;
 			d20plus.importer.makePlayerDraggable(importId, name);
@@ -5415,7 +12308,7 @@ const betteR205etools = function () {
 		const name = data.name;
 		d20.Campaign.handouts.create({
 			name: name,
-			tags:  d20plus.importer.getTagString([
+			tags: d20plus.importer.getTagString([
 				Parser.sourceJsonToFull(data.source)
 			], "background")
 		}, {
@@ -5434,7 +12327,7 @@ const betteR205etools = function () {
 	d20plus.backgrounds.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.backgrounds._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 	};
@@ -5493,7 +12386,7 @@ const betteR205etools = function () {
 		const name = data.name;
 		d20.Campaign.handouts.create({
 			name: name,
-			tags:  d20plus.importer.getTagString([
+			tags: d20plus.importer.getTagString([
 				Parser.sourceJsonToFull(data.source)
 			], "optionalfeature")
 		}, {
@@ -5512,7 +12405,7 @@ const betteR205etools = function () {
 	d20plus.optionalfeatures.playerImportBuilder = function (data) {
 		const [notecontents, gmnotes] = d20plus.optionalfeatures._getHandoutData(data);
 
-		const importId = d20plus.generateRowId();
+		const importId = d20plus.ut.generateRowId();
 		d20plus.importer.storePlayerImport(importId, JSON.parse(gmnotes));
 		d20plus.importer.makePlayerDraggable(importId, data.name);
 	};
@@ -5732,9 +12625,9 @@ const betteR205etools = function () {
 				let remaining = importQueue.length;
 				let interval;
 				if (dataType === "monster" || dataType === "object") {
-					interval = d20plus.getCfgVal("import", "importIntervalCharacter") || d20plus.getCfgDefaultVal("import", "importIntervalCharacter");
+					interval = d20plus.cfg.getCfgVal("import", "importIntervalCharacter") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalCharacter");
 				} else {
-					interval = d20plus.getCfgVal("import", "importIntervalHandout") || d20plus.getCfgDefaultVal("import", "importIntervalHandout");
+					interval = d20plus.cfg.getCfgVal("import", "importIntervalHandout") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalHandout");
 				}
 
 				let cancelWorker = false;
@@ -5791,14 +12684,14 @@ const betteR205etools = function () {
 					if (cancelWorker) {
 						$stsName.text("Import cancelled");
 						if (~$stsRemain.text().indexOf("(cancelled)")) $stsRemain.text(`${$stsRemain.text()} (cancelled)`);
-						d20plus.log(`Import cancelled`);
+						d20plus.ut.log(`Import cancelled`);
 						setTimeout(() => {
 							d20plus.bindDropLocations();
 						}, 250);
 					} else {
 						$stsName.text("Import complete");
 						$stsRemain.text("0");
-						d20plus.log(`Import complete`);
+						d20plus.ut.log(`Import complete`);
 						setTimeout(() => {
 							d20plus.bindDropLocations();
 						}, 250);
@@ -6163,7 +13056,7 @@ const betteR205etools = function () {
 
 				const $stsName = $("#import-name");
 				const $stsRemain = $("#import-remaining");
-				const interval = d20plus.getCfgVal("import", "importIntervalHandout") || d20plus.getCfgDefaultVal("import", "importIntervalHandout");
+				const interval = d20plus.cfg.getCfgVal("import", "importIntervalHandout") || d20plus.cfg.getCfgDefaultVal("import", "importIntervalHandout");
 
 				////////////////////////////////////////////////////////////////////////////////////////////////////////
 				EntryRenderer.getDefaultRenderer().setBaseUrl(BASE_SITE_URL);
@@ -6185,7 +13078,7 @@ const betteR205etools = function () {
 				else doItemImport();
 
 				function showMonsterImport (toImport) {
-					d20plus.log(`Displaying monster import list for [${adMeta.name}]`);
+					d20plus.ut.log(`Displaying monster import list for [${adMeta.name}]`);
 					d20plus.importer.showImportList(
 						"monster",
 						toImport.filter(it => it),
@@ -6211,7 +13104,7 @@ const betteR205etools = function () {
 				}
 
 				function showItemImport (toImport) {
-					d20plus.log(`Displaying item import list for [${adMeta.name}]`);
+					d20plus.ut.log(`Displaying item import list for [${adMeta.name}]`);
 					d20plus.importer.showImportList(
 						"item",
 						toImport.filter(it => it),
@@ -6263,7 +13156,7 @@ const betteR205etools = function () {
 
 					let remaining = addQueue.length;
 
-					d20plus.log(`Running import of [${adMeta.name}] with ${interval} ms delay between each handout create`);
+					d20plus.ut.log(`Running import of [${adMeta.name}] with ${interval} ms delay between each handout create`);
 					let lastId = null;
 					let lastName = null;
 
@@ -6272,7 +13165,7 @@ const betteR205etools = function () {
 							clearInterval(worker);
 							$stsName.text("DONE!");
 							$stsRemain.text("0");
-							d20plus.log(`Finished import of [${adMeta.name}]`);
+							d20plus.ut.log(`Finished import of [${adMeta.name}]`);
 							renderer.resetRoll20Ids();
 							return;
 						}
@@ -6735,6 +13628,7 @@ To import from third-party sources, either individually select one available in 
 
 	d20plus.settingsHtmlPtAdventures = `
 <div class="importer-section" data-import-group="adventure">
+<b style="color: red">Please note that this importer has been superceded by the Module Importer tool, found in the Tools List, or <a href="#" class="Vetools-module-tool-open" style="color: darkred; font-style: italic">by clicking here</a>.</b>
 <h4>Adventure Importing</h4>
 <label for="import-adventures-url">Adventure Data URL:</label>
 <select id="button-adventures-select">
@@ -6743,7 +13637,6 @@ To import from third-party sources, either individually select one available in 
 <input type="text" id="import-adventures-url">
 <p><a class="btn" href="#" id="button-adventures-load">Import Adventure</a><p/>
 <p>
-<b>Maps (pages) from official adventures can be found in the Tools List, in the "Map Importer/Exporter" tool.</b>
 </p>
 </div>
 `;
@@ -6760,7 +13653,7 @@ To restore this functionality, press the "Bind Drag-n-Drop" button.<br>
 </p>
 `;
 
-	d20plus.cssRules = d20plus.cssRules.concat([
+	d20plus.css.cssRules = d20plus.css.cssRules.concat([
 		{
 			s: ".no-shrink",
 			r: "flex-shrink: 0;"
@@ -6835,7 +13728,7 @@ To restore this functionality, press the "Bind Drag-n-Drop" button.<br>
 		},
 	]);
 
-	d20plus.tools = d20plus.tools.concat([
+	d20plus.tool.tools = d20plus.tool.tools.concat([
 		{
 			name: "Shapeshifter Token Builder",
 			desc: "Build a rollable table and related token to represent a shapeshifting creature.",
@@ -6998,7 +13891,7 @@ To restore this functionality, press the "Bind Drag-n-Drop" button.<br>
 						blobs: {}
 					};
 					blobCount = 3;
-					const onBlobsReady = () => DataUtil.userDownload(char.name.replace(/[^0-9A-Za-z -_()\[\]{}]/, "_"), JSON.stringify(out, null, "\t"));
+					const onBlobsReady = () => DataUtil.userDownload(char.name.replace(/[^0-9A-Za-z -_()[\]{}]/, "_"), JSON.stringify(out, null, "\t"));
 
 					const handleBlob = (asKey, data) => {
 						out.blobs[asKey] = data;
@@ -7033,7 +13926,7 @@ To restore this functionality, press the "Bind Drag-n-Drop" button.<br>
 							}
 							const char = json.char;
 
-							const newId = d20plus.generateRowId();
+							const newId = d20plus.ut.generateRowId();
 							d20.Campaign.characters.create(
 								{
 									...char,
@@ -7259,7 +14152,7 @@ To restore this functionality, press the "Bind Drag-n-Drop" button.<br>
 										d20plus.monsters.handoutBuilder(sel, true, options, `Wild Forms - ${d20Character.attributes.name}`);
 									};
 
-									if (sel.hp.formula) d20plus.randomRoll(sel.hp.formula, result => doBuild(result))
+									if (sel.hp.formula) d20plus.ut.randomRoll(sel.hp.formula, result => doBuild(result))
 									else doBuild({total: 0});
 								}
 
@@ -7268,484 +14161,6 @@ To restore this functionality, press the "Bind Drag-n-Drop" button.<br>
 						}
 					);
 				}
-			}
-		},
-		{
-			name: "Module Importer/Exporter",
-			desc: "Import Full Games (Modules), or Import/Export Custom Games",
-			html: `
-				<div id="d20plus-module-importer" title="Module Importer/Exporter">
-				<p style="margin-bottom: 4px;"><b style="font-size: 110%;">Exporter: </b> <button class="btn" name="export">Export Game to File</button> <i>The exported file can later be used with the "Upload File" option, below.</i></p>
-				<hr style="margin: 4px;">
-				<p style="margin-bottom: 4px;">
-					<b style="font-size: 110%;">Importer:</b>
-					<button class="btn readme" style="float: right;">Help/README</button>
-					<div style="clear: both;"></div>
-				</p>
-				<div style="border-bottom: 1px solid #ccc; margin-bottom: 3px; padding-bottom: 3px;">
-					<div style="float: left;">
-						<button class="btn" name="load-Vetools">Load from 5etools</button>
-						<button class="btn" name="load-file">Upload File</button>
-					</div>
-					<div style="float: right;">
-						Import category: 
-						<select name="data-type" disabled style="margin-bottom: 0;">
-							<option value="characters">Characters</option>
-							<option value="decks">Decks</option>
-							<option value="handouts">Handouts</option>
-							<option value="maps">Maps</option>
-							<option value="rolltables">Rollable Tables</option>
-						</select>						
-					</div>
-					<div style="clear: both;"></div>
-				</div>
-				<div id="module-importer-list">
-					<input type="search" class="search" placeholder="Search..." disabled>
-					<div class="list" style="transform: translateZ(0); max-height: 440px; overflow-y: auto; overflow-x: hidden; margin-bottom: 10px;">
-					<i>Load a file to view the contents here</i>
-					</div>
-				</div>
-				<hr>
-				<p><label class="ib"><input type="checkbox" class="select-all"> Select All</label> <button class="btn" style="float: right;" name="import">Import Selected</button></p>
-				</div>
-				
-				<div id="d20plus-module-importer-progress" title="Import Progress">					
-					<h3 class="name"></h3>
-					<span class="remaining"></span> 
-					<p>Errors: <span class="errors">0</span> <span class="error-names"></span></p>
-					<p><button class="btn cancel">Cancel</button></p>
-				</div>
-				
-				<div id="d20plus-module-importer-help" title="Readme">
-					<p>First, either load a module from 5etools, or upload one from a file. Then, choose the category you wish to import; a list of available entries will appear. Select entries from the list as required, and hit "Import Selected."</p>
-					<p>You can import the categories in any order. If you import maps, we recommend importing characters also, as this allows the tokens to correctly link to the character sheets.</p>
-					<p><b>Note:</b> The script-wide configurable "rest time" options affect how quickly each category of entries is imported (tables and decks use the "Handout" rest time).</p>
-					<p><b>Note:</b> Configuration options (aside from "rest time" as detailed above) <i>do not</i> affect the module importer. It effectively "clones" the content as-exported from the original module, including any whisper/advantage/etc settings.</p>
-				</div>
-				
-				<div id="d20plus-module-importer-5etools" title="Select Module">
-					<div id="module-importer-list-5etools">
-						<input type="search" class="search" placeholder="Search modules...">
-						<div class="list" style="transform: translateZ(0); max-height: 480px; overflow-y: auto; overflow-x: hidden; margin-bottom: 10px;">
-						<i>Loading...</i>
-						</div>
-					</div>
-					<p><button class="btn load">Load Module Data</button></p>
-				</div>
-				`,
-			dialogFn: () => {
-				$("#d20plus-module-importer").dialog({
-					autoOpen: false,
-					resizable: true,
-					width: 885,
-					height: 830,
-				});
-				$(`#d20plus-module-importer-progress`).dialog({
-					autoOpen: false,
-					resizable: false
-				});
-				$("#d20plus-module-importer-5etools").dialog({
-					autoOpen: false,
-					resizable: true,
-					width: 800,
-					height: 600,
-				});
-				$("#d20plus-module-importer-help").dialog({
-					autoOpen: false,
-					resizable: true,
-					width: 600,
-					height: 400,
-				});
-			},
-			openFn: () => {
-				const $win = $("#d20plus-module-importer");
-				$win.dialog("open");
-
-				const $winProgress = $(`#d20plus-module-importer-progress`);
-				const $btnCancel = $winProgress.find(".cancel").off("click");
-
-				const $win5etools = $(`#d20plus-module-importer-5etools`);
-
-				const $winHelp = $(`#d20plus-module-importer-help`);
-				const $btnHelp = $win.find(`.readme`).off("click").click(() => $winHelp.dialog("open"));
-
-				const $wrpLst = $win.find(`#module-importer-list`);
-				const $lst = $win.find(`.list`).empty();
-
-				const $btnImport = $win.find(`[name="import"]`).off("click").prop("disabled", true);
-				const $cbAll = $win.find(`.select-all`).off("click").prop("disabled", true);
-				const $iptSearch = $win.find(`.search`).prop("disabled", true);
-
-				const $selDataType = $win.find(`[name="data-type"]`).prop("disabled", true);
-				let lastDataType = $selDataType.val();
-				let genericFolder;
-				let lastLoadedData = null;
-
-				function handleLoadedData (data) {
-					if (!lastDataType) throw new Error(`Module data type was not set!`);
-					lastLoadedData = data;
-					$selDataType.prop("disabled", false);
-					$iptSearch.prop("disabled", false);
-
-					let prop = "";
-					switch (lastDataType) {
-						case "maps": {
-							prop = "maps";
-							break;
-						}
-						case "rolltables": {
-							$("a.ui-tabs-anchor[href='#deckstables']").click();
-							prop = "rolltables";
-							break;
-						}
-						case "decks": {
-							$("a.ui-tabs-anchor[href='#deckstables']").click();
-							prop = "decks";
-							break;
-						}
-						case "handouts": {
-							prop = "handouts";
-							$("a.ui-tabs-anchor[href='#journal']").click();
-							genericFolder = d20plus.importer.makeDirTree(`Handouts`);
-							break;
-						}
-						case "characters": {
-							prop = "characters";
-							$("a.ui-tabs-anchor[href='#journal']").click();
-							genericFolder = d20plus.importer.makeDirTree(`Characters`);
-							break;
-						}
-						default: throw new Error(`Unhandled data type: ${lastDataType}`);
-					}
-
-					const moduleData = data[prop];
-					data[prop].sort((a, b) => SortUtil.ascSortLower(a.attributes.name || "", b.attributes.name || ""));
-
-					$lst.empty();
-					moduleData.forEach((m, i) => {
-						const img = lastDataType === "maps" ? m.attributes.thumbnail :
-							(lastDataType === "characters" || lastDataType === "handouts" || lastDataType === "decks") ? m.attributes.avatar : "";
-
-						$lst.append(`
-									<label class="import-cb-label ${img ? `import-cb-label--img` : ""}" data-listid="${i}">
-										<input type="checkbox">
-										${img && img.trim() ? `<img class="import-label__img" src="${img}">` : ""}
-										<span class="name col-9 readable">${m.attributes.name}</span>
-									</label>
-								`);
-					});
-
-					const mapList = new List("module-importer-list", {
-						valueNames: ["name"]
-					});
-
-					$cbAll.prop("disabled", false).off("click").click(() => {
-						mapList.items.forEach(it => {
-							$(it.elm).find(`input[type="checkbox"]`).prop("checked", $cbAll.prop("checked"));
-						});
-					});
-
-					$btnImport.prop("disabled", false).off("click").click(() => {
-						$cbAll.prop("checked", false);
-						const sel = mapList.items
-							.filter(it => $(it.elm).find(`input`).prop("checked"))
-							.map(it => moduleData[$(it.elm).attr("data-listid")]);
-
-						if (!sel.length) return alert("No entries selected!");
-
-						const $name = $winProgress.find(`.name`);
-						const $remain = $winProgress.find(`.remaining`).text(`${sel.length} remaining...`);
-						const $errCount = $winProgress.find(`.errors`);
-						const $errReasons = $winProgress.find(`.error-names`);
-						let errCount = 0;
-
-						$winProgress.dialog("open");
-
-						const journal = data.journal ? MiscUtil.copy(data.journal).reverse() : null;
-						const dataType = lastDataType;
-
-						let queue = sel;
-						// if importing journal items, make sure they get put back in the right order
-						if (journal && (dataType === "characters" || dataType === "handouts")) {
-							const nuQueue = [];
-
-							journal.forEach(jIt => {
-								const qIx = queue.findIndex(qIt => qIt.attributes.id === jIt.id);
-								if (~qIx) nuQueue.push(queue.splice(qIx, 1)[0]);
-							});
-							queue.forEach(qIt => nuQueue.push(qIt)); // add anything that wasn't in the journal to the end of the queue
-							queue = nuQueue;
-						}
-
-						let isCancelled = false;
-						let lastTimeout = null;
-						$btnCancel.off("click").click(() => {
-							isCancelled = true;
-							if (lastTimeout != null) {
-								clearTimeout(lastTimeout);
-								doImport();
-							}
-						});
-						const timeout = dataType === "maps" ? (d20plus.getCfgVal("import", "importIntervalMap") || d20plus.getCfgDefaultVal("import", "importIntervalMap")) :
-							dataType === "characters" ? (d20plus.getCfgVal("import", "importIntervalCharacter") || d20plus.getCfgDefaultVal("import", "importIntervalCharacter")) :
-								(dataType === "handouts" || dataType === "rolltables") ? (d20plus.getCfgVal("import", "importIntervalHandout") || d20plus.getCfgDefaultVal("import", "importIntervalHandout")) : 5000; // default to 5 secs
-
-						const addToJournal = (originalId, itId) => {
-							let handled = false;
-							if (journal) {
-								const found = journal.find(it => it.id === originalId);
-								if (found) {
-									const rawPath = found.path;
-									const cleanPath = rawPath.slice(1); // paths start with "Root"
-									const folder = d20plus.importer.makeDirTree(...cleanPath);
-									d20.journal.addItemToFolderStructure(itId, folder.id);
-									handled = true;
-								}
-							}
-
-							if (!handled) d20.journal.addItemToFolderStructure(itId, genericFolder.id);
-						};
-
-						const doImport = () => {
-							if (isCancelled) {
-								$name.text("Import cancelled.");
-								$remain.text(`Cancelled with ${queue.length} remaining.`);
-							} else if (queue.length && !isCancelled) {
-								$remain.text(`${queue.length} remaining...`);
-								const data = queue.shift();
-								const name = data.attributes.name;
-								try {
-									$name.text(`Importing ${name}`);
-
-									switch (dataType) {
-										case "maps": {
-											const map = d20.Campaign.pages.create(data.attributes);
-											data.graphics.forEach(it => map.thegraphics.create(it));
-											data.paths.forEach(it => map.thepaths.create(it));
-											data.text.forEach(it => map.thetexts.create(it));
-											map.save();
-											break;
-										}
-										case "rolltables": {
-											const table = d20.Campaign.rollabletables.create(data.attributes);
-											table.tableitems.reset();
-											const toSave = data.tableitems.map(it => table.tableitems.push(it));
-											toSave.forEach(s => s.save());
-											table.save();
-											break;
-										}
-										case "decks": {
-											const deck = d20.Campaign.decks.create(data.attributes);
-											deck.cards.reset();
-											const toSave = data.cards.map(it => deck.cards.push(it));
-											toSave.forEach(s => s.save());
-											deck.save();
-											break;
-										}
-										case "handouts": {
-											d20.Campaign.handouts.create(data.attributes,
-												{
-													success: function (handout) {
-														handout.updateBlobs({
-															notes: data.blobNotes,
-															gmnotes: data.blobGmNotes
-														});
-
-														addToJournal(data.attributes.id, handout.id);
-													}
-												}
-											)
-											break;
-										}
-										case "characters": {
-											d20.Campaign.characters.create(data.attributes,
-												{
-													success: function (character) {
-														character.attribs.reset();
-														const toSave = data.attribs.map(a => character.attribs.push(a));
-														toSave.forEach(s => s.syncedSave());
-
-														character.updateBlobs({
-															bio: data.blobBio,
-															gmnotes: data.blobGmNotes,
-															defaulttoken: data.blobDefaultToken
-														});
-
-														addToJournal(data.attributes.id, character.id);
-													}
-												}
-											);
-											break;
-										}
-										default: throw new Error(`Unhandled data type: ${dataType}`);
-									}
-								} catch (e) {
-									console.error(e);
-
-									errCount++;
-									$errCount.text(errCount);
-									const prevReasons = $errReasons.text().trim();
-									$errReasons.append(`${prevReasons.length ? ", " : ""}${name}: "${e.message}"`)
-								}
-
-								// queue up the next import
-								lastTimeout = setTimeout(doImport, timeout);
-							} else {
-								$name.text("Import complete!");
-								$remain.text(`${queue.length} remaining.`);
-							}
-						};
-
-						doImport();
-					});
-				}
-
-				$selDataType.off("change").on("change", () => {
-					lastDataType = $selDataType.val();
-					if (lastLoadedData) handleLoadedData(lastLoadedData)
-				});
-
-				const $btnLoadVetools = $win.find(`[name="load-Vetools"]`);
-				$btnLoadVetools.off("click").click(() => {
-					$win5etools.dialog("open");
-					const $btnLoad = $win5etools.find(`.load`).off("click");
-
-					DataUtil.loadJSON(`${DATA_URL}roll20-module/roll20-module-index.json`).then(data => {
-						const $lst = $win5etools.find(`.list`);
-						const modules = data.map.sort((a, b) => SortUtil.ascSortLower(a.name, b.name));
-						let tmp = "";
-						modules.forEach((t, i) => {
-							tmp += `
-								<label class="import-cb-label" data-listid="${i}">
-									<input type="radio" name="map-5etools">
-									<span class="name col-7 readable">${t.name}</span>
-									<span class="name col-3 readable" style="text-align: right;">${d20plus.getReadableFileSizeString(t.size)}</span>
-									<span title="${Parser.sourceJsonToFull(t.id)}" class="source readable" style="text-align: right;">SRC[${Parser.sourceJsonToAbv(t.id)}]</span>
-								</label>
-							`;
-						});
-						$lst.html(tmp);
-						tmp = null;
-
-						const list5etools = new List("module-importer-list-5etools", {
-							valueNames: ["name"]
-						});
-
-						$btnLoad.on("click", () => {
-							const sel = list5etools.items
-								.filter(it => $(it.elm).find(`input`).prop("checked"))
-								.map(it => modules[$(it.elm).attr("data-listid")])[0];
-
-							$win5etools.dialog("close");
-							$win.dialog("open");
-							$lst.empty().append(`<i>Loading...</i>`);
-							DataUtil.loadJSON(`${DATA_URL}roll20-module/roll20-module-${sel.id.toLowerCase()}.json`)
-								.then(moduleFile => handleLoadedData(moduleFile))
-								.catch(e => {
-									console.error(e);
-									alert(`Failed to load data! See the console for more information.`);
-								});
-						});
-					}).catch(e => {
-						console.error(e);
-						alert(`Failed to load data! See the console for more information.`);
-					});
-				});
-
-				const $btnLoadFile = $win.find(`[name="load-file"]`);
-				$btnLoadFile.off("click").click(() => {
-					DataUtil.userUpload((data) => handleLoadedData(data));
-				});
-
-				const $btnExport = $win.find(`[name="export"]`);
-				$btnExport.off("click").click(() => {
-					console.log("Exporting journal...");
-					const journal = d20plus.importer.getExportableJournal();
-
-					console.log("Exporting maps...");
-					const maps = d20.Campaign.pages.models.map(map => ({ // shoutouts to Stormy
-						attributes: map.attributes,
-						graphics: map.thegraphics.map(g => g.attributes),
-						text: map.thetexts.map(t => t.attributes),
-						paths: map.thepaths.map(p => p.attributes)
-					}));
-
-					console.log("Exporting tables...");
-					const rolltables = d20.Campaign.rollabletables.models.map(rolltable => ({
-						attributes: rolltable.attributes,
-						tableitems: rolltable.tableitems.models.map(tableitem => tableitem.attributes)
-					}));
-
-					console.log("Exporting decks...");
-					const decks = d20.Campaign.decks.models.map(deck => {
-						if (deck.name && deck.name.toLowerCase() === "playing cards") return;
-						return {
-							attributes: deck.attributes,
-							cards: deck.cards.models.map(card => card.attributes)
-						};
-					}).filter(it => it);
-
-					let blobCount = 0;
-					let onBlobsReady = null;
-
-					const handleBlob = (addTo, asKey, data) => {
-						addTo[asKey] = data;
-						blobCount--;
-						if (onBlobsReady && blobCount === 0) onBlobsReady();
-					};
-
-					console.log("Exporting characters...");
-					const characters = d20.Campaign.characters.models.map(character => {
-						const out = {
-							attributes: character.attributes,
-							attribs: character.attribs
-						};
-						blobCount += 3;
-						character._getLatestBlob("bio", (data) => handleBlob(out, "blobBio", data));
-						character._getLatestBlob("gmnotes", (data) => handleBlob(out, "blobGmNotes", data));
-						character._getLatestBlob("defaulttoken", (data) => handleBlob(out, "blobDefaultToken", data));
-						return out;
-					});
-
-					console.log("Exporting handouts...");
-					const handouts = d20.Campaign.handouts.models.map(handout => {
-						if (handout.attributes.name === ART_HANDOUT || handout.attributes.name === CONFIG_HANDOUT) return;
-
-						const out = {
-							attributes: handout.attributes
-						};
-						blobCount += 2;
-						handout._getLatestBlob("notes", (data) => handleBlob(out, "blobNotes", data));
-						handout._getLatestBlob("gmnotes", (data) => handleBlob(out, "blobGmNotes", data));
-						return out;
-					}).filter(it => it);
-
-					console.log("Waiting for blobs...");
-					onBlobsReady = () => {
-						console.log("Blobs are ready!");
-						const payload = {
-							schema_version: 1, // version number from r20es
-							maps,
-							rolltables,
-							decks,
-							journal,
-							handouts,
-							characters
-						};
-
-						const filename = document.title.replace(/\|\s*Roll20$/i, "").trim().replace(/[^\w\-]/g, "_");
-						const data = JSON.stringify(payload, null, "\t");
-
-						const blob = new Blob([data], {type: "application/json"})
-						d20plus.saveAs(blob, `${filename}.json`);
-					};
-
-					// TODO
-					/*
-					macro
-					jukebox track
-					 */
-				});
 			}
 		}
 	]);
@@ -7804,7 +14219,7 @@ To restore this functionality, press the "Bind Drag-n-Drop" button.<br>
 	<li class='token <$ if (this.layer === "gmlayer") { $>gmlayer<$ } $>' data-tokenid='<$!this.id$>' data-currentindex='<$!this.idx$>'>
 		<$ var token = d20.Campaign.pages.get(d20.Campaign.activePage()).thegraphics.get(this.id); $>
 		<$ var char = (token) ? token.character : null; $>
-		<$ if (d20plus.getCfgVal("interface", "customTracker") && d20plus.getCfgVal("interface", "trackerSheetButton")) { $>
+		<$ if (d20plus.cfg.getCfgVal("interface", "customTracker") && d20plus.cfg.getCfgVal("interface", "trackerSheetButton")) { $>
 			<span alt='Sheet Macro' title='Sheet Macro' class='initmacro'>
 				<button type='button' class='initmacrobutton ui-button ui-widget ui-state-default ui-corner-all ui-button-text-only pictos' role='button' aria-disabled='false'>
 				<span class='ui-button-text'>N</span>
@@ -7859,6 +14274,7 @@ SCRIPT_EXTENSIONS.push(betteR205etools);
 const betteR20Emoji = function () {
 	d20plus.chat = {};
 
+	// to dump the keys as one-per-line colon-fotmatted: `JSON.stringify(Object.keys(d20plus.chat.emojiIndex).sort(SortUtil.ascSortLower), null, 1).replace(/",/g, ":").replace(/"/g, ":").replace(/[ \[\]]/g, "").trim()`
 	d20plus.chat.emojiIndex = {
 		joy: !0,
 		heart: !0,
@@ -9050,12 +15466,12 @@ const betteR20Emoji = function () {
 		}
 	);
 
-	d20plus.enhanceChat = () => {
-		d20plus.log("Enhancing chat");
+	d20plus.chat.enhanceChat = () => {
+		d20plus.ut.log("Enhancing chat");
 		const tc = d20.textchat.$textarea;
 		$("#textchat-input").off("click", "button")
 		$("#textchat-input").on("click", "button", function () {
-			if (!window.is_gm || d20plus.getCfgVal("interface", "emoji")) {
+			if (!window.is_gm || d20plus.cfg.getCfgVal("interface", "emoji")) {
 				tc.val(tc.val().replace(/(:\w*?:)/g, (m0, m1) => {
 					const clean = m1.replace(/:/g, "");
 					return d20plus.chat.emojiIndex && d20plus.chat.emojiIndex[clean] ? `[${clean}](https://github.com/TheGiddyLimit/emoji-dump/raw/master/out/${clean}.png)` : m1;
@@ -9070,29 +15486,10 @@ const betteR20Emoji = function () {
 
 SCRIPT_EXTENSIONS.push(betteR20Emoji);
 
-var betteR20Base = function () {
-	const modes = new Set([
-		"delete",
-		"drawselect",
-		"ellipse",
-		"fxtools",
-		"fog-hide",
-		"fog-polygonreveal",
-		"fog-reveal",
-		"gridalign",
-		"image",
-		"line",
-		"measure",
-		"pan",
-		"path",
-		"polygon",
-		"rect",
-		"select",
-		"selectp",
-		"targeting",
-		"text"
-	]);
 
+unsafeWindow.d20plus = {};
+
+const betteR20Base = function () {
 	CONSOLE_LOG = console.log;
 	console.log = (...args) => {
 		if (args.length === 1 && typeof args[0] === "string" && args[0].startsWith("Switch mode to ")) {
@@ -9151,5991 +15548,10 @@ var betteR20Base = function () {
 		"_name": "Interface",
 		"toolbarOpacity": {
 			"name": "Horizontal Toolbar Opacity (0.00-1.00)",
-			"default": 0.75,
+			"default": 1,
 			"_type": "float"
 		},
 	});
-
-	const qpi = {
-		_version: "0.01-pre-pre-alpha",
-		_: {
-			log: {
-				_ (...args) {
-					qpi._log(...args)
-				},
-				works: 1
-			},
-
-			// Campaign: { // FIXME this overwrites the window's campaign, which breaks stuff
-			// 	_ () {
-			// 		return Campaign;
-			// 	},
-			// 	works: 0
-			// },
-
-			on: {
-				_preInit () {
-					qpi._on_chatHandlers = [];
-					const seenMessages = new Set();
-					d20.textchat.chatref = d20.textchat.shoutref.parent().child("chat");
-					const handleChat = (e) => {
-						if (!d20.textchat.chatstartingup) {
-							e.id = e.key();
-							if (!seenMessages.has(e.id)) {
-								seenMessages.add(e.id);
-
-								var t = e.val();
-								if (t) {
-									if (window.DEBUG) console.log("CHAT: ", t);
-
-									qpi._on_chatHandlers.forEach(fn => fn(t));
-								}
-							}
-						}
-					};
-					d20.textchat.chatref.on("child_added", handleChat);
-					d20.textchat.chatref.on("child_changed", handleChat);
-				},
-				_ (evtType, fn, ...others) {
-					switch (evtType) {
-						case "chat:message":
-							qpi._on_chatHandlers.push(fn);
-							break;
-						default:
-							console.error("Unhandled message type: ", evtType, "with args", fn, others)
-							break;
-					}
-				},
-				works: 0.01,
-				notes: [
-					`"chat:message" is the only available event.`
-				]
-			},
-
-			createObj: {
-				_ (objType, obj, ...others) {
-					switch (objType) {
-						case "path": {
-							const page = d20.Campaign.pages._byId[obj._pageid];
-							obj.scaleX = obj.scaleX || 1;
-							obj.scaleY = obj.scaleY || 1;
-							obj.path = obj.path || obj._path
-							return page.thepaths.create(obj)
-							break;
-						}
-						default:
-							console.error("Unhandled object type: ", objType, "with args", obj, others)
-							break;
-					}
-				},
-				works: 0.01,
-				notes: [
-					`Only supports "path" obects.`
-				]
-			},
-
-			sendChat: { // TODO lift code from doChatInput
-				_ (speakingAs, input, callback, options) {
-					const message = {
-						who: speakingAs,
-						type: "general",
-						content: input,
-						playerid: window.currentPlayer.id,
-						avatar: null,
-						inlinerolls: []
-					};
-
-					const key = d20.textchat.chatref.push().key();
-					d20.textchat.chatref.child(key).setWithPriority(message, Firebase.ServerValue.TIMESTAMP)
-				},
-				works: 0.01,
-				notes: [
-					`speakingAs: String only.`,
-					`input: String only.`,
-					`callback: Unimplemented.`,
-					`options: Unimplemented.`,
-					`Messages are always sent with the player ID of the QPI user.`
-				]
-			},
-
-			// findObjs: {
-			// 	_ (attrs) {
-			// 		// TODO
-			// 		// const getters = {
-			// 		// 	attribute: () => {},
-			// 		// 	character: () => {},
-			// 		// 	handout: () => {}
-			// 		// };
-			// 		// const getAll = () => {
-			// 		// 	const out = [];
-			// 		// 	Object.values(getters).forEach(fn => out.push(...fn()));
-			// 		// 	return out;
-			// 		// };
-			//
-			// 		// let out = attrs._type ? getters[attrs._type]() : getAll();
-			//
-			// 		throw new Error("findObjs is unimplemented!");
-			// 	},
-			// 	works: 0.00,
-			// 	notes: [
-			// 		`Unimplemented.`
-			// 	]
-			// }
-		},
-
-		_loadedScripts: null,
-		_init () {
-			Object.keys(qpi._).forEach(k => {
-				const it = qpi._[k];
-				if (it._preInit) it._preInit();
-				window[k] = it._;
-			});
-
-			qpi._loadedScripts = StorageUtil.get("VeQpi") || {};
-
-			$(`body`).append(`
-				<div id="qpi-manager" title="QPI Script Manager - v${qpi._version}">
-					<div class="qpi-table"></div>
-					<div>
-						<input placeholder="URL*" class="qpi-url">
-						<button class="btn qpi-add-url">Add URL</button>
-					</div>
-					<hr>
-					<div>
-						<input placeholder="Name*" class="qpi-name">
-						<button class="btn qpi-add-text">Load Script</button>
-						<br>
-						<textarea class="qpi-text" style="width: 100%; height: 300px; resize: vertical;"></textarea>
-					</div>
-					<hr>
-					<button class="btn qpi-help">Help/README</button> <i>Note that this tool is a for-testing faceplate over some internal code. It is intended for internal use only.</i>
-				</div>	
-			`);
-			$(`#qpi-manager`).dialog({
-				autoOpen: false,
-				resizable: true,
-				width: 800,
-				height: 600,
-			});
-
-			$(`body`).append(`
-				<div id="qpi-manager-readme" title="QPI README - v${qpi._version}">
-					<div class="qpi-readme"></div>
-				</div>	
-			`);
-			$(`#qpi-manager-readme`).dialog({
-				autoOpen: false,
-				resizable: true,
-				width: 800,
-				height: 600,
-			});
-
-			qpi._log("Initialised!");
-		},
-
-		man (name) {
-			if (!name) {
-				qpi._log(`Showing all...\n==== Available API Mimics ====\n  - ${Object.keys(qpi._).join("()\n  - ")}()`);
-				return;
-			}
-
-			const found = Object.keys(qpi._).find(k => k === name);
-			if (!found) qpi._log(`No mimic with ${name} found -- perhaps it's unimplemented?`);
-			else {
-				const it = qpi._[found];
-				qpi._log(`Showing "${name}"...\n==== ${name} :: ${it.works * 100}% functional ====\n${(it.notes || []).join("\n")}`);
-			}
-		},
-
-		_manHtml () {
-			let stack = "";
-			Object.keys(qpi._).forEach(k => {
-				stack += `<h5>${k}</h5>`;
-				const it = qpi._[k];
-				stack += `<p><i>Estimated ${it.works * 100}% functional</i><br>${(it.notes || []).join("<br>")}</p>`;
-			});
-			return stack;
-		},
-
-		_openManager () {
-			const $win = $(`#qpi-manager`);
-
-			$win.find(`.qpi-help`).off("click").on("click", () => {
-				const $winReadme = $(`#qpi-manager-readme`);
-				$winReadme.dialog("open");
-
-				$winReadme.find(`.qpi-readme`).html(qpi._manHtml());
-			});
-
-			$win.find(`.qpi-add-url`).off("click").on("click", () => {
-				const url = $win.find(`.qpi-url`).val();
-				if (url && script.trim()) {
-					qpi._log(`Attempting to load: "${url}"`);
-					d20plus.loadWithRetries(
-						url,
-						url,
-						(data) => {
-							d20plus._addScript(url, data).then(() => {
-								alert("Loaded successfully!");
-								$win.find(`.qpi-url`).val("");
-							}).catch(() => {
-								alert("Failed to load script! See the console for more details (CTRL-SHIFT-J on Chrome)");
-							});
-						}
-					)
-				} else {
-					alert("Please enter a URL!");
-				}
-			});
-
-			$win.find(`.qpi-add-text`).off("click").on("click", () => {
-				const name = $win.find(`.qpi-name`).val();
-				const script = $win.find(`.qpi-text`).val();
-				if (name && script && name.trim() && script.trim()) {
-					qpi._log(`Attempting to eval user script: ${name}`);
-					d20plus._addScript(name, script).then(() => {
-						alert("Loaded successfully!");
-						$win.find(`.qpi-name`).val("");
-						$win.find(`.qpi-text`).val("");
-					}).catch(() => {
-						alert("Failed to load script! See the console for more details (CTRL-SHIFT-J on Chrome)");
-					});
-				} else {
-					alert("Please enter a name and some code!");
-				}
-			});
-
-			$win.dialog("open");
-		},
-
-		_log (...args) {
-			console.log("%cQPI > ", "color: #ff00ff; font-size: large", ...args);
-		}
-	};
-	window.qpi = qpi;
-
-	const d20plus = {
-		// EXTERNAL SCRIPTS ////////////////////////////////////////////////////////////////////////////////////////////
-		scriptsLoaded: false,
-		scripts: [
-			{name: "listjs", url: "https://raw.githubusercontent.com/javve/list.js/v1.5.0/dist/list.min.js"},
-			{name: "5etoolsUtils", url: `${SITE_JS_URL}utils.js`}
-		],
-		apiScripts: [
-			{name: "VecMath", url: "https://raw.githubusercontent.com/Roll20/roll20-api-scripts/master/Vector%20Math/1.0/VecMath.js"},
-			{name: "MatrixMath", url: "https://raw.githubusercontent.com/Roll20/roll20-api-scripts/master/MatrixMath/1.0/matrixMath.js"},
-			{name: "PathMath", url: "https://raw.githubusercontent.com/Roll20/roll20-api-scripts/master/PathMath/1.5/PathMath.js"}
-		],
-
-		addScripts: (onLoadFunction) => {
-			d20plus.log("Add JS");
-			const onEachLoadFunction = function (name, url, js) {
-				d20plus._addScript(name, js);
-			};
-			d20plus.chainLoad(d20plus.scripts, 0, onEachLoadFunction, (...args) => {
-				onLoadFunction(...args);
-
-				const cached = DataUtil.loadJSON;
-				DataUtil.loadJSON = (...args) => {
-					if (args.length > 0 && typeof args[0] === "string" && args[0].startsWith("data/")) {
-						args[0] = BASE_SITE_URL + args[0];
-					}
-					return cached.bind(DataUtil)(...args);
-				};
-			});
-		},
-
-		addApiScripts: (onLoadFunction) => {
-			d20plus.log("Add Builtin API Scripts");
-			const onEachLoadFunction = function (name, url, js) {
-				d20plus._addScript(name, js);
-			};
-			d20plus.chainLoad(d20plus.apiScripts, 0, onEachLoadFunction, onLoadFunction);
-		},
-
-		_addScript (name, js) {
-			return new Promise((resolve, reject) => {
-				try {
-					window.eval(js);
-					d20plus.log(`JS [${name}] Loaded`);
-					resolve()
-				} catch (e) {
-					d20plus.log(`Error loading [${name}]`);
-					d20plus.log(e);
-					reject(e);
-				}
-			})
-		},
-
-		chainLoad: (toLoads, index, onEachLoadFunction, onFinalLoadFunction) => {
-			const toLoad = toLoads[index];
-			// on loading the last item, run onLoadFunction
-			d20plus.loadWithRetries(
-				toLoad.name,
-				toLoad.url,
-				(data) => {
-					if (index === toLoads.length - 1) {
-						onEachLoadFunction(toLoad.name, toLoad.url, data);
-						onFinalLoadFunction();
-					} else {
-						onEachLoadFunction(toLoad.name, toLoad.url, data);
-						d20plus.chainLoad(toLoads, index + 1, onEachLoadFunction, onFinalLoadFunction);
-					}
-				}
-			);
-		},
-
-		loadWithRetries (name, url, onSuccess) {
-			let retries = 3;
-			function withRetries () {
-				return new Promise((resolve, reject) => {
-					$.ajax({
-						type: "GET",
-						url: `${url}${d20plus.getAntiCacheSuffix()}${retries}`,
-						success: function (data) {
-							resolve(data);
-						},
-						error: function (resp, qq, pp) {
-							if (resp && resp.status >= 400 && retries-- > 0) {
-								console.error(resp, qq, pp);
-								d20plus.log(`Error loading ${name}; retrying`);
-								setTimeout(() => {
-									withRetries().then((data) => onSuccess(data));
-								}, 500);
-							} else {
-								console.error(resp, qq, pp);
-								d20plus.log(`Error loading ${name}`);
-								reject(resp, qq, pp);
-							}
-						}
-					});
-				})
-			}
-
-			withRetries().then((data) => onSuccess(data));
-		},
-
-		// MOCK API  ///////////////////////////////////////////////////////////////////////////////////////////////////
-		initMockApi: () => { // TODO check if this needs to be enabled for players too
-			d20plus.log("Initialising mock API");
-			qpi._init();
-		},
-
-		// UTILITIES ///////////////////////////////////////////////////////////////////////////////////////////////////
-		log: (...args) => {
-			console.log("%cD20Plus > ", "color: #3076b9; font-size: large", ...args);
-		},
-
-		chatLog: (arg) => {
-			d20.textchat.incoming(
-				false,
-				{
-					who: "5e.tools",
-					type: "general",
-					content: (arg || "").toString(),
-					playerid: window.currentPlayer.id,
-					id: d20plus.generateRowId(),
-					target: window.currentPlayer.id,
-					avatar: "https://5e.tools/icon.png"
-				}
-			);
-		},
-
-		ascSort: (a, b) => {
-			if (b === a) return 0;
-			return b < a ? 1 : -1;
-		},
-
-		disable3dDice () {
-			d20plus.log("Disabling 3D dice");
-			const $cb3dDice = $(`#enable3ddice`);
-			$cb3dDice.prop("checked", false).attr("disabled", true)
-				.attr("title", "3D dice are incompatible with betteR20. We apologise for any inconvenience caused.");
-
-			d20.tddice.canRoll3D = () => false;
-		},
-
-		checkVersion () {
-			function cmpVersions (a, b) {
-				const regExStrip0 = /(\.0+)+$/;
-				const segmentsA = a.replace(regExStrip0, '').split('.');
-				const segmentsB = b.replace(regExStrip0, '').split('.');
-				const l = Math.min(segmentsA.length, segmentsB.length);
-
-				for (let i = 0; i < l; i++) {
-					const diff = parseInt(segmentsA[i], 10) - parseInt(segmentsB[i], 10);
-					if (diff) {
-						return diff;
-					}
-				}
-				return segmentsA.length - segmentsB.length;
-			}
-
-			d20plus.log("Checking current version");
-			$.ajax({
-				url: `https://get.5e.tools`,
-				success: (data) => {
-					const m = /<!--\s*(\d+\.\d+\.\d+)\s*-->/.exec(data);
-					if (m) {
-						const curr = d20plus.version;
-						const avail = m[1];
-						const cmp = cmpVersions(curr, avail);
-						if (cmp < 0) {
-							setTimeout(() => {
-								d20plus.sendHackerChat(`A newer version of the script is available. Get ${avail} <a href="https://get.5e.tools/">here</a>.`);
-							}, 1000);
-						}
-					}
-				},
-				error: () => {
-					d20plus.log("Failed to check version");
-				}
-			})
-		},
-
-		chatTag: (message) => {
-			d20plus.sendHackerChat(`
-				${message} initialised.
-				${window.enhancementSuiteEnabled ? `<br><br>Roll20 Enhancement Suite detected.` : ""}
-				<br>
-				<br>
-				Need help? Join our <a href="https://discord.gg/AzyBjtQ">Discord</a>.
-				<br>
-				<br>
-				<span title="You'd think this would be obvious.">
-				Please DO NOT post about this script or any related content in official channels, including the Roll20 forums.
-				<br>
-				<br>
-				Before reporting a bug on the Roll20 forums, please disable the script and check if the problem persists. 
-				</span>
-			`);
-		},
-
-		showLoadingMessage: (message) => {
-			d20plus.sendHackerChat(`
-				${message} initialising, please wait...<br><br>
-			`);
-		},
-
-		sendHackerChat: (message) => {
-			d20.textchat.incoming(false, ({
-				who: "system",
-				type: "system",
-				content: `<span class="hacker-chat">
-					${message}
-				</span>`
-			}));
-		},
-
-		addCSS: (sheet, selector, rules) => {
-			const index = sheet.cssRules.length;
-			if ("insertRule" in sheet) {
-				sheet.insertRule(selector + "{" + rules + "}", index);
-			} else if ("addRule" in sheet) {
-				sheet.addRule(selector, rules, index);
-			}
-		},
-
-		addAllCss: () => {
-			d20plus.log("Add CSS");
-			const targetSheet =  [...window.document.styleSheets]
-				.filter(it => it.href && (!it.href.startsWith("moz-extension") && !it.href.startsWith("chrome-extension")))
-				.find(it => it.href.includes("app.css"));
-
-			_.each(d20plus.baseCssRules, function (r) {
-				d20plus.addCSS(targetSheet, r.s, r.r);
-			});
-			if (!window.is_gm) {
-				_.each(d20plus.baseCssRulesPlayer, function (r) {
-					d20plus.addCSS(targetSheet, r.s, r.r);
-				});
-			}
-			_.each(d20plus.cssRules, function (r) {
-				d20plus.addCSS(targetSheet, r.s, r.r);
-			});
-		},
-
-		getAntiCacheSuffix: () => {
-			return "?" + (new Date()).getTime();
-		},
-
-		generateRowId: () => {
-			return window.generateUUID().replace(/_/g, "Z");
-		},
-
-		randomRoll: (roll, success, error) => {
-			d20.textchat.diceengine.process(roll, success, error);
-		},
-
-		randomInt: (int) => {
-			// Return random integer between [0,int)
-			return d20.textchat.diceengine.random(int);
-		},
-
-		getJournalFolderObj: () => {
-			d20.journal.refreshJournalList();
-			let journalFolder = d20.Campaign.get("journalfolder");
-			if (journalFolder === "") {
-				d20.journal.addFolderToFolderStructure("Characters");
-				d20.journal.refreshJournalList();
-				journalFolder = d20.Campaign.get("journalfolder");
-			}
-			return JSON.parse(journalFolder);
-		},
-
-		getCleanText: (str) => {
-			const check = jQuery.parseHTML(str);
-			if (check.length === 1 && check[0].constructor === Text) {
-				return str;
-			}
-			const $ele = $(str);
-			$ele.find("p, li, br").append("\n\n");
-			return $ele.text().replace(/[ ]+/g, " ");
-		},
-
-		_lastInput: null,
-		getNumberRange (promptText, min, max) {
-			function alertInvalid () {
-				alert("Please enter a valid range.");
-			}
-
-			function isOutOfRange (num) {
-				return num < min || num > max;
-			}
-
-			function addToRangeVal (range, num) {
-				range.add(num);
-			}
-
-			function addToRangeLoHi (range, lo, hi) {
-				for (let i = lo; i <= hi; ++i) {
-					range.add(i);
-				}
-			}
-
-			function alertOutOfRange () {
-				alert(`Please enter numbers in the range ${min}-${max} (inclusive).`);
-			}
-
-			while (true) {
-				const res =  prompt(promptText, d20plus._lastInput || "E.g. 1-5, 8, 11-13");
-				if (res && res.trim()) {
-					d20plus._lastInput = res;
-					const clean = res.replace(/\s*/g, "");
-					if (/^((\d+-\d+|\d+),)*(\d+-\d+|\d+)$/.exec(clean)) {
-						const parts = clean.split(",");
-						const out = new Set();
-						let failed = false;
-
-						for (const part of parts) {
-							if (part.includes("-")) {
-								const spl = part.split("-");
-								const numLo = Number(spl[0]);
-								const numHi = Number(spl[1]);
-
-								if (isNaN(numLo) || isNaN(numHi) || numLo === 0 || numHi === 0 || numLo > numHi) {
-									alertInvalid();
-									failed = true;
-									break;
-								}
-
-								if (isOutOfRange(numLo) || isOutOfRange(numHi)) {
-									alertOutOfRange();
-									failed = true;
-									break;
-								}
-
-								if (numLo === numHi) {
-									addToRangeVal(out, numLo);
-								} else {
-									addToRangeLoHi(out, numLo, numHi);
-								}
-							} else {
-								const num = Number(part);
-								if (isNaN(num) || num === 0) {
-									alertInvalid();
-									failed = true;
-									break;
-								} else {
-									if (isOutOfRange(num)) {
-										alertOutOfRange();
-										failed = true;
-										break;
-									}
-									addToRangeVal(out, num);
-								}
-							}
-						}
-
-						if (!failed) {
-							d20plus._lastInput = null;
-							return out;
-						}
-					} else {
-						alertInvalid();
-					}
-				} else {
-					d20plus._lastInput = null;
-					return null;
-				}
-			}
-		},
-
-		math: {
-			/**
-			 * Normalize a 2d vector.
-			 * @param out Result storage
-			 * @param a Vector to normalise
-			 */
-			normalize (out, a) {
-				const x = a[0],
-					y = a[1];
-				let len = x*x + y*y;
-				if (len > 0) {
-					len = 1 / Math.sqrt(len);
-					out[0] = a[0] * len;
-					out[1] = a[1] * len;
-				}
-				return out;
-			},
-
-			/**
-			 * Scale a 2d vector.
-			 * @param out Resulst storage
-			 * @param a Vector to scale
-			 * @param b Value to scale by
-			 */
-			scale (out, a, b) {
-				out[0] = a[0] * b;
-				out[1] = a[1] * b;
-				return out;
-			}
-		},
-
-		_BYTE_UNITS: [' kB', ' MB', ' GB', ' TB', 'PB', 'EB', 'ZB', 'YB'],
-		getReadableFileSizeString: (fileSizeInBytes) => {
-			let i = -1;
-			do {
-				fileSizeInBytes = fileSizeInBytes / 1024;
-				i++;
-			} while (fileSizeInBytes > 1024);
-			return Math.max(fileSizeInBytes, 0.1).toFixed(1) + d20plus._BYTE_UNITS[i];
-		},
-
-		// CONFIG //////////////////////////////////////////////////////////////////////////////////////////////////////
-		config: {},
-
-		loadConfigFailed: false,
-
-		loadConfig: (nextFn) => {
-			d20plus.log("Reading Config");
-			let configHandout = d20plus.getConfigHandout();
-
-			if (!configHandout) {
-				d20plus.log("No config found! Initialising new config...");
-				d20plus.makeDefaultConfig(doLoad);
-			} else {
-				doLoad();
-			}
-
-			function doLoad () {
-				configHandout = d20plus.getConfigHandout();
-				if (configHandout) {
-					configHandout.view.render();
-					configHandout._getLatestBlob("gmnotes", function (gmnotes) {
-						try {
-							const decoded = decodeURIComponent(gmnotes);
-
-							d20plus.config = JSON.parse(decoded);
-
-							d20plus.log("Config Loaded:");
-							d20plus.log(d20plus.config);
-							nextFn();
-						} catch (e) {
-							if (!d20plus.loadConfigFailed) {
-								// prevent infinite loops
-								d20plus.loadConfigFailed = true;
-
-								d20plus.log("Corrupted config! Rebuilding...");
-								d20plus.makeDefaultConfig(() => {
-									d20plus.loadConfig(nextFn)
-								});
-							} else {
-								// if the config fails, continue to load anyway
-								nextFn();
-							}
-						}
-					});
-				} else {
-					d20plus.log("Failed to create config handout!");
-					nextFn();
-				}
-			}
-		},
-
-		loadPlayerConfig: (nextFn) => {
-			d20plus.log("Reading player Config");
-			const loaded = StorageUtil.get(`Veconfig`);
-			if (!loaded) {
-				d20plus.log("No player config found! Initialising new config...");
-				const dfltConfig = d20plus.getDefaultConfig();
-				d20plus.config = Object.assign(d20plus.config, dfltConfig);
-				StorageUtil.set(`Veconfig`, d20plus.config);
-			}
-			d20plus.log("Player config Loaded:");
-			d20plus.log(d20plus.config);
-			nextFn();
-		},
-
-		makeDefaultConfig: (nextFn) => {
-			d20.Campaign.handouts.create({
-				name: CONFIG_HANDOUT
-			}, {
-				success: function (handout) {
-					notecontents = "The GM notes contain config options saved between sessions. If you want to wipe your saved settings, delete this handout and reload roll20. If you want to edit your settings, click the \"Edit Config\" button in the <b>Settings</b> (cog) panel.";
-
-					// default settings
-					// token settings mimic official content; other settings as vanilla as possible
-					const gmnotes = JSON.stringify(d20plus.getDefaultConfig());
-
-					handout.updateBlobs({notes: notecontents, gmnotes: gmnotes});
-					handout.save({notes: (new Date).getTime(), inplayerjournals: ""});
-
-					if (nextFn) nextFn();
-				}
-			});
-		},
-
-		getConfigHandout: () => {
-			d20plus.getJournalFolderObj(); // ensure journal init
-
-			return d20.Campaign.handouts.models.find(function (handout) {
-				return handout.attributes.name === CONFIG_HANDOUT;
-			});
-		},
-
-		getCfgKey: (group, val) => {
-			if (val === undefined || d20plus.config[group] === undefined) return undefined;
-			const gr = d20plus.config[group];
-			for (const key of Object.keys(d20plus.config[group])) {
-				if (gr[key] !== undefined && gr[key] === val) {
-					return key;
-				}
-			}
-			return undefined;
-		},
-
-		getRawCfgVal: (group, key) => {
-			if (d20plus.config[group] === undefined) return undefined;
-			if (d20plus.config[group][key] === undefined) return undefined;
-			return d20plus.config[group][key];
-		},
-
-		getCfgVal: (group, key) => {
-			if (d20plus.config[group] === undefined) return undefined;
-			if (d20plus.config[group][key] === undefined) return undefined;
-			if (CONFIG_OPTIONS[group][key]._type === "_SHEET_ATTRIBUTE") {
-				if (!NPC_SHEET_ATTRIBUTES[d20plus.config[group][key]]) return undefined;
-				return NPC_SHEET_ATTRIBUTES[d20plus.config[group][key]][d20plus.sheet];
-			}
-			if (CONFIG_OPTIONS[group][key]._type === "_SHEET_ATTRIBUTE_PC") {
-				if (!PC_SHEET_ATTRIBUTES[d20plus.config[group][key]]) return undefined;
-				return PC_SHEET_ATTRIBUTES[d20plus.config[group][key]][d20plus.sheet];
-			}
-			return d20plus.config[group][key];
-		},
-
-		getCfgDefaultVal: (group, key) => {
-			if (CONFIG_OPTIONS[group] === undefined) return undefined;
-			if (CONFIG_OPTIONS[group][key] === undefined) return undefined;
-			return CONFIG_OPTIONS[group][key].default
-		},
-
-		getCfgEnumVals: (group, key) => {
-			if (CONFIG_OPTIONS[group] === undefined) return undefined;
-			if (CONFIG_OPTIONS[group][key] === undefined) return undefined;
-			return CONFIG_OPTIONS[group][key]._values
-		},
-
-		getDefaultConfig: () => {
-			const outCpy = {};
-			$.each(CONFIG_OPTIONS, (sectK, sect) => {
-				if (window.is_gm || sect._player) {
-					outCpy[sectK] = outCpy[sectK] || {};
-					$.each(sect, (k, data) => {
-						if (!k.startsWith("_") && (window.is_gm || data._player)) {
-							outCpy[sectK][k] = data.default;
-						}
-					});
-				}
-			});
-			return outCpy;
-		},
-
-		// Helpful for checking if a boolean option is set even if false
-		hasCfgVal: (group, key) => {
-			if (d20plus.config[group] === undefined) return undefined;
-			return d20plus.config[group][key] !== undefined;
-		},
-
-		setCfgVal: (group, key, val) => {
-			if (d20plus.config[group] === undefined) d20plus.config[group] = {};
-			d20plus.config[group][key] = val;
-		},
-
-		makeTabPane: ($addTo, headers, content) => {
-			if (headers.length !== content.length) throw new Error("Tab header and content length were not equal!");
-
-			if ($addTo.attr("hastabs") !== "YES") {
-				const $tabBar = $(`<ul class="nav nav-tabs"/>`);
-
-				const tabList = [];
-				const paneList = [];
-				const $tabPanes = $(`<div class="tabcontent"/>`);
-
-				$.each(content, (i, e) => {
-					const toAdd = $(`<div class="plustab${i} tab-pane" ${i === 0 ? "" : `style="display: none"`}/>`);
-					toAdd.append(e);
-					paneList[i] = toAdd;
-					$tabPanes.append(toAdd);
-				});
-
-				$.each(headers, (i, e) => {
-					const toAdd = $(`<li ${i === 0 ? `class="active"` : ""}><a data-tab="plustab${i}" href="#">${e}</a></li>`).on("click", () => {
-						paneList.forEach((p, i2) => {
-							if (i2 === i) {
-								tabList[i2].addClass("active");
-								paneList[i2].show();
-							} else {
-								tabList[i2].removeClass("active");
-								paneList[i2].hide();
-							}
-						});
-					});
-					tabList[i] = (toAdd);
-					$tabBar.append(toAdd);
-				});
-
-				$addTo
-					.append($tabBar)
-					.append($tabPanes);
-
-				$addTo.attr("hastabs", "YES");
-			}
-		},
-
-		openConfigEditor: () => {
-			const cEdit = $("#d20plus-configeditor");
-			cEdit.dialog("open");
-
-			if (cEdit.attr("hastabs") !== "YES") {
-				cEdit.attr("hastabs", "YES");
-				const appendTo = $(`<div/>`);
-				cEdit.prepend(appendTo);
-
-				const configFields = {};
-
-				let sortedKeys = Object.keys(CONFIG_OPTIONS).sort((a, b) => d20plus.ascSort(CONFIG_OPTIONS[a]._name, CONFIG_OPTIONS[b]._name));
-				if (!window.is_gm) sortedKeys = sortedKeys.filter(k => CONFIG_OPTIONS[k]._player);
-
-				const tabList = sortedKeys.map(k => CONFIG_OPTIONS[k]._name);
-				const contentList = sortedKeys.map(k => makeTab(k));
-
-				function makeTab (cfgK) {
-					const cfgGroup = CONFIG_OPTIONS[cfgK];
-					configFields[cfgK] = {};
-
-					const content = $(`
-						<div class="config-table-wrapper">
-							<table class="config-table">
-								<thead><tr><th>Property</th><th>Value</th></tr></thead>
-								<tbody></tbody>
-							</table>
-						</div>
-					`);
-					const tbody = content.find(`tbody`);
-
-					let sortedTabKeys = Object.keys(cfgGroup).filter(k => !k.startsWith("_"));
-					if (!window.is_gm) sortedTabKeys = sortedTabKeys.filter(k => cfgGroup[k]._player);
-
-					sortedTabKeys.forEach((grpK, idx) => {
-						const prop = cfgGroup[grpK];
-
-						// IDs only used for label linking
-						const toAdd = $(`<tr><td><label for="conf_field_${idx}" class="config-name">${prop.name}</label></td></tr>`);
-
-						// Each config `_type` should have a case here. Each case should add a function to the map [configFields:[cfgK:grpK]]. These functions should return the value of the input.
-						switch (prop._type) {
-							case "boolean": {
-								const field = $(`<input type="checkbox" id="conf_field_${idx}" ${d20plus.getCfgVal(cfgK, grpK) ? `checked` : ""}>`);
-
-								configFields[cfgK][grpK] = () => {
-									return field.prop("checked")
-								};
-
-								const td = $(`<td/>`).append(field);
-								toAdd.append(td);
-								break;
-							}
-							case "String": {
-								const curr = d20plus.getCfgVal(cfgK, grpK) || "";
-								const def = d20plus.getCfgDefaultVal(cfgK, grpK) || "";
-								const field = $(`<input id="conf_field_${idx}" value="${curr}" ${def ? `placeholder="Default: ${def}"` : ""}>`);
-
-								configFields[cfgK][grpK] = () => {
-									return field.val() ? field.val().trim() : "";
-								};
-
-								const td = $(`<td/>`).append(field);
-								toAdd.append(td);
-								break;
-							}
-							case "_SHEET_ATTRIBUTE_PC":
-							case "_SHEET_ATTRIBUTE": {
-								const DICT = prop._type === "_SHEET_ATTRIBUTE" ? NPC_SHEET_ATTRIBUTES : PC_SHEET_ATTRIBUTES;
-								const sortedNpcsAttKeys = Object.keys(DICT).sort((at1, at2) => d20plus.ascSort(DICT[at1].name, DICT[at2].name));
-								const field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${sortedNpcsAttKeys.map(npcK => `<option value="${npcK}">${DICT[npcK].name}</option>`)}</select>`);
-								const cur = d20plus.getCfgVal(cfgK, grpK);
-								if (cur !== undefined) {
-									field.val(cur);
-								}
-
-								configFields[cfgK][grpK] = () => {
-									return field.val()
-								};
-
-								const td = $(`<td/>`).append(field);
-								toAdd.append(td);
-								break;
-							}
-							case "float":
-							case "integer": {
-								const def = d20plus.getCfgDefaultVal(cfgK, grpK);
-								const field = $(`<input id="conf_field_${idx}" type="number" value="${d20plus.getCfgVal(cfgK, grpK)}" ${def != null ? `placeholder="Default: ${def}"` : ""}>`);
-
-								configFields[cfgK][grpK] = () => {
-									return Number(field.val());
-								};
-
-								const td = $(`<td/>`).append(field);
-								toAdd.append(td);
-								break;
-							}
-							case "_FORMULA": {
-								const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.formulas._options.sort().map(opt => `<option value="${opt}">${opt}</option>`)}</select>`);
-
-								const cur = d20plus.getCfgVal(cfgK, grpK);
-								if (cur !== undefined) {
-									$field.val(cur);
-								}
-
-								configFields[cfgK][grpK] = () => {
-									return $field.val();
-								};
-
-								const td = $(`<td/>`).append($field);
-								toAdd.append(td);
-								break;
-							}
-							case "_WHISPERMODE": {
-								const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.whisperModes.map(mode => `<option value="${mode}">${mode}</option>`)}</select>`);
-
-								const cur = d20plus.getCfgVal(cfgK, grpK);
-								if (cur !== undefined) {
-									$field.val(cur);
-								}
-
-								configFields[cfgK][grpK] = () => {
-									return $field.val();
-								};
-
-								const td = $(`<td/>`).append($field);
-								toAdd.append(td);
-								break;
-							}
-							case "_ADVANTAGEMODE": {
-								const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.advantageModes.map(mode => `<option value="${mode}">${mode}</option>`)}</select>`);
-
-								const cur = d20plus.getCfgVal(cfgK, grpK);
-								if (cur !== undefined) {
-									$field.val(cur);
-								}
-
-								configFields[cfgK][grpK] = () => {
-									return $field.val();
-								};
-
-								const td = $(`<td/>`).append($field);
-								toAdd.append(td);
-								break;
-							}
-							case "_DAMAGEMODE": {
-								const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.damageModes.map(mode => `<option value="${mode}">${mode}</option>`)}</select>`);
-
-								const cur = d20plus.getCfgVal(cfgK, grpK);
-								if (cur !== undefined) {
-									$field.val(cur);
-								}
-
-								configFields[cfgK][grpK] = () => {
-									return $field.val();
-								};
-
-								const td = $(`<td/>`).append($field);
-								toAdd.append(td);
-								break;
-							}
-							case "_enum": { // for generic String enums not covered above
-								const $field = $(`<select id="conf_field_${idx}" class="cfg_grp_${cfgK}" data-item="${grpK}">${d20plus.getCfgEnumVals(cfgK, grpK).map(it => `<option value="${it}">${it}</option>`)}</select>`);
-
-								const cur = d20plus.getCfgVal(cfgK, grpK);
-								if (cur !== undefined) {
-									$field.val(cur);
-								} else {
-									const def = d20plus.getCfgDefaultVal(cfgK, grpK);
-									if (def !== undefined) {
-										$field.val(def);
-									}
-								}
-
-								configFields[cfgK][grpK] = () => {
-									return $field.val();
-								};
-
-								const td = $(`<td/>`).append($field);
-								toAdd.append(td);
-								break;
-							}
-						}
-						tbody.append(toAdd);
-					});
-
-					return content;
-				}
-
-				d20plus.makeTabPane(
-					appendTo,
-					tabList,
-					contentList
-				);
-
-				const saveButton = $(`#configsave`);
-				saveButton.unbind("click");
-				saveButton.bind("click", () => {
-					function _updateLoadedConfig () {
-						$.each(configFields, (cfgK, grp) => {
-							$.each(grp, (grpK, grpVField) => {
-								d20plus.setCfgVal(cfgK, grpK, grpVField());
-							})
-						});
-					}
-
-					if (window.is_gm) {
-						let handout = d20plus.getConfigHandout();
-						if (!handout) {
-							d20plus.makeDefaultConfig(doSave);
-						} else {
-							doSave();
-						}
-
-						function doSave () {
-							_updateLoadedConfig();
-
-							const gmnotes = JSON.stringify(d20plus.config).replace(/%/g, "%25");
-							handout.updateBlobs({gmnotes: gmnotes});
-							handout.save({notes: (new Date).getTime()});
-
-							d20plus.log("Saved config");
-
-							d20plus.baseHandleConfigChange();
-							if (d20plus.handleConfigChange) d20plus.handleConfigChange();
-						}
-					} else {
-						_updateLoadedConfig();
-						StorageUtil.set(`Veconfig`, d20plus.config);
-						d20plus.baseHandleConfigChange();
-						if (d20plus.handleConfigChange) d20plus.handleConfigChange();
-					}
-				});
-			}
-		},
-
-		_handleStatusTokenConfigChange: () => {
-			if (window.is_gm) {
-				if (d20plus.getCfgVal("token", "enhanceStatus")) {
-					const sheetUrl = d20plus.getCfgVal("token", "statusSheetUrl") || d20plus.getCfgDefaultVal("token", "statusSheetUrl");
-					const sheetSmallUrl = d20plus.getCfgVal("token", "statusSheetSmallUrl") || d20plus.getCfgDefaultVal("token", "statusSheetSmallUrl");
-
-					window.Campaign && window.Campaign.save({
-						"bR20cfg_statussheet": sheetUrl,
-						"bR20cfg_statussheet_small": sheetSmallUrl
-					});
-
-					d20.token_editor.statussheet.src = sheetUrl;
-					d20.token_editor.statussheet_small.src =  sheetSmallUrl;
-					d20plus._removeStatusEffectEntries(); // clean up any old data
-					d20plus._addStatusEffectEntries();
-				} else {
-					window.Campaign && window.Campaign.save({
-						"bR20cfg_statussheet": "",
-						"bR20cfg_statussheet_small": ""
-					});
-
-					d20.token_editor.statussheet.src = "/images/statussheet.png";
-					d20.token_editor.statussheet_small.src = "/images/statussheet_small.png";
-					d20plus._removeStatusEffectEntries();
-				}
-			} else {
-				if (window.Campaign && window.Campaign.attributes && window.Campaign.attributes.bR20cfg_statussheet && window.Campaign.attributes.bR20cfg_statussheet_small) {
-					d20.token_editor.statussheet.src = window.Campaign.attributes.bR20cfg_statussheet;
-					d20.token_editor.statussheet_small.src =  window.Campaign.attributes.bR20cfg_statussheet_small;
-					d20plus._addStatusEffectEntries();
-				} else {
-					d20.token_editor.statussheet.src = "/images/statussheet.png";
-					d20.token_editor.statussheet_small.src = "/images/statussheet_small.png";
-					d20plus._removeStatusEffectEntries();
-				}
-			}
-		},
-
-		baseHandleConfigChange: () => {
-			d20plus._handleStatusTokenConfigChange();
-			if (d20plus.hasCfgVal("interface", "toolbarOpacity")) {
-				const v = Math.max(Math.min(Number(d20plus.getCfgVal("interface", "toolbarOpacity")), 1), 0);
-				$(`#secondary-toolbar`).css({opacity: v});
-			}
-		},
-
-		startPlayerConfigHandler: () => {
-			function handlePlayerCfg () {
-				d20plus.baseHandleConfigChange();
-				if (d20plus.handleConfigChange) d20plus.handleConfigChange(true);
-			}
-
-			// every 5 seconds, poll and apply any config changes the GM might have made
-			if (!window.is_gm) {
-				setInterval(() => {
-					handlePlayerCfg();
-				}, 5000);
-			}
-			handlePlayerCfg();
-		},
-
-		// SETTINGS TOOLS //////////////////////////////////////////////////////////////////////////////////////////////
-		tools: [
-			{
-				name: "Journal Cleaner",
-				desc: "Quickly select and delete journal items, especially useful for cleaning up loose items after deleting a folder.",
-				html: `
-				<div id="d20plus-quickdelete" title="Journal Root Cleaner">
-				<p>A list of characters and handouts in the journal folder root, which allows them to be quickly deleted.</p>
-				<label style="font-weight: bold">Root Only <input type="checkbox" class="cb-deep" checked></label>
-				<hr>
-				<p style="display: flex; justify-content: space-between"><label><input type="checkbox" title="Select all" id="deletelist-selectall"> Select All</label> <a class="btn" href="#" id="quickdelete-btn-submit">Delete Selected</a></p>
-				<div id="delete-list-container">
-					<input class="search" autocomplete="off" placeholder="Search list..." style="width: 100%;">
-					<br><br>
-					<ul class="list deletelist" style="max-height: 420px; overflow-y: scroll; display: block; margin: 0;"></ul>
-				</div>
-				</div>
-				`,
-				dialogFn: () => {
-					$("#d20plus-quickdelete").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 800,
-						height: 700,
-					});
-				},
-				openFn: () => {
-					const $win = $("#d20plus-quickdelete");
-					$win.dialog("open");
-					const $cbDeep = $win.find(`.cb-deep`);
-
-					const $cbAll = $("#deletelist-selectall").unbind("click");
-
-					const $btnDel = $(`#quickdelete-btn-submit`).off("click");
-
-					$cbDeep.off("change").on("change", () => populateList());
-
-					populateList();
-
-					function populateList () {
-						// collect a list of all journal items
-						function getAllJournalItems () {
-							const out = [];
-
-							function recurse (entry, pos, isRoot) {
-								if (entry.i) {
-									if (!isRoot) pos.push(entry.n);
-									entry.i.forEach(nxt => recurse(nxt, pos));
-									pos.pop();
-								} else out.push({id: entry, path: MiscUtil.copy(pos)});
-							}
-
-							const root = {i: d20plus.getJournalFolderObj()};
-							recurse(root, [], true);
-							return out.map(it => getItemFromId(it.id, it.path.join(" / ")));
-						}
-
-						function getRootJournalItems () {
-							const rootItems = [];
-							const journal = d20plus.getJournalFolderObj();
-							journal.forEach(it => {
-								if (it.i) return; // skip folders
-								rootItems.push(getItemFromId(it));
-							});
-							return rootItems;
-						}
-
-						function getItemFromId (itId, path = "") {
-							const handout = d20.Campaign.handouts.get(itId);
-							if (handout && (handout.get("name") === CONFIG_HANDOUT || handout.get("name") === ART_HANDOUT)) return null; // skip 5etools handouts
-							const character = d20.Campaign.characters.get(itId);
-							if (handout) return {type: "handouts", id: itId, name: handout.get("name"), path: path};
-							if (character) return {type: "characters", id: itId, name: character.get("name"), path: path};
-						}
-
-						function getJournalItems () {
-							if ($cbDeep.prop("checked")) return getRootJournalItems().filter(it => it);
-							else return getAllJournalItems().filter(it => it);
-						}
-
-						const journalItems = getJournalItems();
-
-						const $delList = $win.find(`.list`);
-						$delList.empty();
-
-						journalItems.forEach((it, i) => {
-							$delList.append(`
-							<label class="import-cb-label" data-listid="${i}">
-								<input type="checkbox">
-								<span class="name readable">${it.path ? `${it.path} / ` : ""}${it.name}</span>
-							</label>
-						`);
-						});
-
-						// init list library
-						const delList = new List("delete-list-container", {
-							valueNames: ["name"],
-							listClass: "deletelist"
-						});
-
-						$cbAll.prop("checked", false);
-						$cbAll.off("click").click(() => d20plus.importer._importToggleSelectAll(delList, $cbAll));
-
-						$btnDel.off("click").on("click", () => {
-							const sel = delList.items
-								.filter(it => $(it.elm).find(`input`).prop("checked"))
-								.map(it => journalItems[$(it.elm).attr("data-listid")]);
-
-							if (!sel.length) {
-								alert("No items selected!");
-							} else if (confirm(`Are you sure you want to delete the ${sel.length} selected item${sel.length > 1 ? "s" : ""}?`)) {
-								$win.dialog("close");
-								$("a.ui-tabs-anchor[href='#journal']").trigger("click");
-								sel.forEach(toDel => {
-									d20.Campaign[toDel.type].get(toDel.id).destroy();
-								});
-								$("#journalfolderroot").trigger("change");
-							}
-						});
-					}
-				}
-			},
-			{
-				name: "SVG Draw",
-				desc: "Paste SVG data as text to automatically draw the paths.",
-				html: `
-				<div id="d20plus-svgdraw" title="SVG Drawing Tool">
-				<p>Paste SVG data as text to automatically draw any included &lt;path&gt;s. Draws to the current layer, in the top-left corner, with no scaling. Takes colour information from &quot;stroke&quot; attributes.</p>
-				<p>Line width (px; default values are 1, 3, 5, 8, 14): <input name="stroke-width" placeholder="5" value="5" type="number"></p>
-				<textarea rows="10" cols="100" placeholder="Paste SVG data here"></textarea>
-				<br>
-				<button class="btn">Draw</button>
-				</div>
-				`,
-				dialogFn: () => {
-					$("#d20plus-svgdraw").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 800,
-						height: 650,
-					});
-				},
-				openFn: () => {
-					// adapted from `d20.engine.finishCurrentPolygon`
-					function addShape(path, pathStroke, strokeWidth) {
-						let i = d20.engine.convertAbsolutePathStringtoFabric(path);
-						i = _.extend(i, {
-							strokeWidth: strokeWidth,
-							fill: "transparent",
-							stroke: pathStroke,
-							path: JSON.parse(i.path)
-						});
-						d20.Campaign.activePage().addPath(i);
-						d20.engine.debounced_renderTop();
-					}
-
-					const $win = $("#d20plus-svgdraw");
-					$win.dialog("open");
-
-					$win.find(`button`).off("click").on("click", () => {
-						d20plus.log("Drawing paths");
-						const input = $win.find(`textarea`).val();
-						const svg = $.parseXML(input);
-
-						const toDraw = $(svg).find("path").map((i, e) => {
-							const $e = $(e);
-							return {stroke: $e.attr("stroke") || "black", d: $e.attr("d")}
-						}).get();
-
-						const strokeWidth = Math.max(1, Number($win.find(`input[name="stroke-width"]`).val()));
-
-						toDraw.forEach(it => {
-							addShape(it.d, it.stroke, strokeWidth)
-						});
-					});
-				}
-			},
-			{
-				name: "Multi-Whisper",
-				desc: "Send whispers to multiple players ",
-				html: `
-				<div id="d20plus-whispers" title="Multi-Whisper Tool">
-				<div>
-					<button class="btn toggle-dc">Show Disconnected Players</button>
-					<button class="btn send-all">Send All Messages</button>
-					<button class="btn clear-all">Clear All Messages</button>
-				</div>
-				<hr>
-				<div class="messages" style="max-height: 600px; overflow-y: auto; overflow-x: hidden; transform: translateZ(0)">
-					<!-- populate with JS -->
-				</div>
-				</div>
-				`,
-				dialogFn: () => {
-					$("#d20plus-whispers").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 1000,
-						height: 760,
-					});
-				},
-				openFn: () => {
-					$("a.ui-tabs-anchor[href='#textchat']").trigger("click");
-
-					const $win = $("#d20plus-whispers");
-					$win.dialog("open");
-
-					const $btnToggleDc = $win.find(`.toggle-dc`).off("click").text("Show Disconnected Players");
-					const $btnSendAll = $win.find(`.send-all`).off("click");
-					const $btnClearAll = $win.find(`.clear-all`).off("click");
-
-					const $pnlMessages = $win.find(`.messages`).empty();
-					const players = d20.Campaign.players.toJSON();
-					players.forEach((p, i) => {
-						const $btnSend = $(`<button class="btn send" style="margin-right: 5px;">Send</button>`).on("click", function () {
-							const $btn = $(this);
-							const $wrp = $btn.closest(`.wrp-message`);
-							const toMsg = $wrp.find(`input[data-player-id]:checked`).filter(":visible").map((ii, e) => $(e).attr("data-player-id")).get();
-							const content = $wrp.find(`.message`).val().trim();
-							toMsg.forEach(targetId => {
-								d20.textchat.doChatInput(`/w ${d20.Campaign.players.get(targetId).get("displayname").split(" ")[0]} ${content}`);
-
-								// This only posts to local player's chat, sadly
-								// d20.textchat.incoming(
-								// 	false,
-								// 	{
-								// 		avatar: `/users/avatar/${window.currentPlayer.get("d20userid")}/30`,
-								// 		who: d20.textchat.$speakingas.find("option:first-child").text(),
-								// 		type: "whisper",
-								// 		content: content,
-								// 		playerid: window.currentPlayer.id,
-								// 		id: d20plus.generateRowId(),
-								// 		target: targetId,
-								// 		target_name: d20.Campaign.players.get(targetId).get("displayname") || ""
-								// 	}
-								// );
-							})
-						});
-
-						const $btnClear =  $(`<button class="btn msg-clear">Clear</button>`).on("click", function () {
-							$(this).closest(`.wrp-message`).find(`.message`).val("");
-						});
-
-						$pnlMessages.append($(`
-							<div ${p.online || `style="display: none;"`} data-online="${p.online}" class="wrp-message">
-								<div>
-									${players.map((pp, ii) => `<label style="margin-right: 10px; ${pp.online || ` display: none;`}" data-online="${pp.online}" class="display-inline-block">${pp.displayname} <input data-player-id="${pp.id}" type="checkbox" ${i === ii ? `checked="true"` : ""}></label>`).join("")}
-								</div>
-								<textarea style="display: block; width: 95%;" placeholder="Enter whisper" class="message"></textarea>
-							</div>						
-						`).append($btnSend).append($btnClear).append(`<hr>`));
-					});
-
-					$btnToggleDc.on("click", () => {
-						$btnToggleDc.text($btnToggleDc.text().startsWith("Show") ? "Hide Disconnected Players" : "Show Disconnected Players");
-						$pnlMessages.find(`[data-online="false"]`).toggle();
-					});
-
-					$btnSendAll.on("click", () => {
-						$pnlMessages.find(`button.send`).click();
-					});
-
-					$btnClearAll.on("click", () => $pnlMessages.find(`button.msg-clear`).click());
-				}
-			},
-			{
-				name: "Table Importer",
-				desc: "Import TableExport data",
-				html: `
-				<div id="d20plus-tables" title="Table Importer">
-					<div>
-					<button class="btn paste-clipboard">Paste from Clipboard</button> <i>Accepts <a href="https://app.roll20.net/forum/post/1144568/script-tableexport-a-script-for-exporting-and-importing-rollable-tables-between-accounts">TableExport</a> format.</i>
-					</div>
-					<br>
-					<div id="table-list">
-						<input type="search" class="search" placeholder="Search tables...">
-						<div class="list" style="transform: translateZ(0); max-height: 490px; overflow-y: scroll; overflow-x: hidden;"><i>Loading...</i></div>
-					</div>
-				<br>
-				<button class="btn start-import">Import</button>
-				</div>
-				
-				<div id="d20plus-tables-clipboard" title="Paste from Clipboard"/>
-				`,
-				dialogFn: () => {
-					$("#d20plus-tables").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 650,
-						height: 720,
-					});
-					$(`#d20plus-tables-clipboard`).dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 640,
-						height: 480,
-					});
-				},
-				openFn: () => {
-					const $win = $("#d20plus-tables");
-					$win.dialog("open");
-
-					const $btnImport = $win.find(`.start-import`).off("click");
-					const $btnClipboard = $win.find(`.paste-clipboard`).off("click");
-
-					const url = `${BASE_SITE_URL}/data/roll20-tables.json`;
-					DataUtil.loadJSON(url).then((data) => {
-						function createTable (t) {
-							const r20t = d20.Campaign.rollabletables.create({
-								name: t.name.replace(/\s+/g, "-"),
-								showplayers: t.isShown,
-								id: d20plus.generateRowId()
-							});
-
-							r20t.tableitems.reset(t.items.map(i => {
-								const out = {
-									id: d20plus.generateRowId(),
-									name: i.row
-								};
-								if (i.weight !== undefined) out.weight = i.weight;
-								if (i.avatar) out.avatar = i.avatar;
-								return out;
-							}));
-							r20t.tableitems.forEach(it => it.save());
-						}
-
-						// Allow pasting of custom tables
-						$btnClipboard.on("click", () => {
-							const $wrpClip = $(`#d20plus-tables-clipboard`);
-							const $iptClip = $(`<textarea placeholder="Paste TableExport data here" style="display: block; width: 600px; height: 340px;"/>`).appendTo($wrpClip);
-							const $btnCheck = $(`<button class="btn" style="margin-right: 5px;">Check if Valid</button>`).on("click", () => {
-								let error = false;
-								try {
-									getFromPaste($iptClip.val());
-								} catch (e) {
-									console.error(e);
-									window.alert(e.message);
-									error = true;
-								}
-								if (!error) window.alert("Looking good!");
-							}).appendTo($wrpClip);
-							const $btnImport = $(`<button class="btn">Import</button>`).on("click", () => {
-								const ts = getFromPaste($iptClip.val());
-								ts.forEach(t => createTable(t));
-							}).appendTo($wrpClip);
-
-							$wrpClip.dialog("open");
-						});
-
-						function getFromPaste (paste) {
-							const tables = [];
-							let tbl = null;
-
-							paste.split("\n").forEach(line => parseLine(line.trim()));
-							parseLine(""); // ensure trailing newline
-							return tables;
-
-							function parseLine (line) {
-								if (line.startsWith("!import-table-item")) {
-									if (!tbl) {
-										throw new Error("No !import-table statement found");
-									}
-									const [junk, tblName, row, weight] = line.split("--").map(it => it.trim());
-									tbl.items.push({
-										row,
-										weight
-									})
-								} else if (line.startsWith("!import-table")) {
-									if (tbl) {
-										throw new Error("No blank line found between tables")
-									}
-									const [junk, tblName,showHide] = line.split("--").map(it => it.trim());
-									tbl = {
-										name: tblName,
-										isShown: showHide.toLowerCase() === "show"
-									};
-									tbl.items = [];
-								} else if (line.trim()) {
-									throw new Error("Non-empty line which didn't match !import-table or !import-table-item")
-								} else {
-									if (tbl) {
-										tables.push(tbl);
-										tbl = null;
-									}
-								}
-							}
-						}
-
-						// Official tables
-						const $lst = $win.find(`.list`);
-						const tables = data.table.sort((a, b) => SortUtil.ascSort(a.name, b.name));
-						let tmp = "";
-						tables.forEach((t, i) => {
-							tmp += `
-								<label class="import-cb-label" data-listid="${i}">
-									<input type="checkbox">
-									<span class="name col-6">${t.name}</span>
-									<span title="${t.source ? Parser.sourceJsonToFull(t.source) : "Unknown Source"}" class="source">SRC[${t.source ? Parser.sourceJsonToAbv(t.source) : "UNK"}]</span>
-									<span class="name col-4">${d20plus.getReadableFileSizeString(t.size)}</span>
-								</label>
-							`;
-						});
-						$lst.html(tmp);
-						tmp = null;
-
-						const tableList = new List("table-list", {
-							valueNames: ["name", "source"]
-						});
-
-						$btnImport.on("click", () => {
-							$("a.ui-tabs-anchor[href='#deckstables']").trigger("click");
-							const sel = tableList.items
-								.filter(it => $(it.elm).find(`input`).prop("checked"))
-								.map(it => tables[$(it.elm).attr("data-listid")]);
-
-							sel.forEach(t => createTable(t));
-						});
-					});
-				}
-			},
-			{
-				name: "Token Avatar URL Fixer",
-				desc: "Change the root URL for tokens en-masse.",
-				html: `
-				<div id="d20plus-avatar-fixer" title="Avatar Fixer">
-				<p><b>Warning:</b> this thing doesn't really work.</p>
-				<p>Current URLs (view only): <select class="view-only"></select></p>
-				<p><label>Replace:<br><input name="search" value="https://5e.tools/"></label></p>
-				<p><label>With:<br><input name="replace" value="https://thegiddylimit.github.io/"></label></p>
-				<p><button class="btn">Go!</button></p>
-				</div>
-				`,
-				dialogFn: () => {
-					$("#d20plus-avatar-fixer").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 400,
-						height: 400,
-					});
-				},
-				openFn: () => {
-					// FIXME this doesn't work, because it saves a nonsensical blob (imgsrc) instead of defaulttoken
-					// see the working code in `initArtFromUrlButtons` for how this _should_ be done
-
-					function replaceAll (str, search, replacement) {
-						return str.split(search).join(replacement);
-					}
-
-					const $win = $("#d20plus-avatar-fixer");
-					$win.dialog("open");
-
-					const $selView = $win.find(`.view-only`);
-					const toView = [];
-					d20.Campaign.characters.toJSON().forEach(c => {
-						if (c.avatar && c.avatar.trim()) {
-							toView.push(c.avatar);
-						}
-					});
-					toView.sort(SortUtil.ascSort).forEach(url => $selView.append(`<option disabled>${url}</option>`));
-
-					const $btnGo = $win.find(`button`).off("click");
-					$btnGo.on("click", () => {
-						let count = 0;
-						$("a.ui-tabs-anchor[href='#journal']").trigger("click");
-
-						const search = $win.find(`[name="search"]`).val();
-						const replace = $win.find(`[name="replace"]`).val();
-
-						d20.Campaign.characters.toJSON().forEach(c => {
-							const id = c.id;
-
-							const realC = d20.Campaign.characters.get(id);
-
-							const curr = realC.get("avatar");
-							let toSave = false;
-							if (curr.includes(search)) {
-								count++;
-								realC.set("avatar", replaceAll(curr, search, replace));
-								toSave = true;
-							}
-							if (realC.get("defaulttoken")) {
-								realC._getLatestBlob("defaulttoken", (bl) => {
-									if (bl && bl.imgsrc && bl.imgsrc.includes(search)) {
-										count++;
-										realC.updateBlobs({imgsrc: replaceAll(bl.imgsrc, search, replace)});
-										toSave = true;
-									}
-								});
-							}
-							if (toSave) {
-								realC.save();
-							}
-						});
-						window.alert(`Replaced ${count} item${count === 0 || count > 1 ? "s" : ""}.`)
-					});
-				}
-			},
-			{
-				name: "Map Importer/Exporter",
-				desc: "Import and export maps (pages), including those from published adventures.",
-				html: `
-				<div id="d20plus-map-importer" title="Map Importer/Exporter">
-				<p><button class="btn" name="load-file">Import Maps from File</button> <button class="btn" name="export">Export Maps to File</button></p>
-				<div id="map-importer-list">
-					<input type="search" class="search" placeholder="Search maps...">
-					<div class="list" style="transform: translateZ(0); max-height: 480px; overflow-y: scroll; overflow-x: hidden; margin-bottom: 10px;">
-					<i>Load a file to view the contents here</i>
-					</div>
-				</div>
-				<hr>
-				<p><label class="ib"><input type="checkbox" class="select-all"> Select All</label> <button class="btn" style="float: right;" name="import">Import Selected</button></p>
-				</div>
-				
-				<div id="d20plus-map-importer-progress" title="Import Progress">					
-					<h3 class="name"></h3>
-					<span class="remaining"></span> 
-					<p>Errors: <span class="errors">0</span><span class="error-names"></span></p>
-					<p><button class="btn cancel">Cancel</button></p>
-				</div>
-				
-				<div id="d20plus-map-importer-5etools" title="Select Map File">
-					<div id="map-importer-list-5etools">
-						<input type="search" class="search" placeholder="Search files...">
-						<div class="list" style="transform: translateZ(0); max-height: 480px; overflow-y: scroll; overflow-x: hidden; margin-bottom: 10px;">
-						<i>Loading...</i>
-						</div>
-					</div>
-					<p><button class="btn load">Load Map Data</button></p>
-				</div>
-				`,
-				dialogFn: () => {
-					$("#d20plus-map-importer").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 600,
-						height: 800,
-					});
-					$(`#d20plus-map-importer-progress`).dialog({
-						autoOpen: false,
-						resizable: false
-					});
-					$("#d20plus-map-importer-5etools").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 600,
-						height: 400,
-					});
-				},
-				openFn: () => {
-					const $win = $("#d20plus-map-importer");
-					$win.dialog("open");
-
-					const $winProgress = $(`#d20plus-map-importer-progress`);
-					const $btnCancel = $winProgress.find(".cancel").off("click");
-
-					const $wrpLst = $win.find(`#map-importer-list`);
-					const $lst = $win.find(`.list`).empty();
-
-					const $btnImport = $win.find(`[name="import"]`).off("click").prop("disabled", true);
-					const $cbAll = $win.find(`.select-all`).off("click").prop("disabled", true);
-
-					function handleLoadedData (data) {
-						// validate
-						if (!data.maps) return alert("File did not contain map data!");
-						for (const mapData of data.maps) {
-							if (!mapData.attributes) return alert("File did not contain map attribute data!");
-							if (!mapData.graphics) return alert("File did not contain map graphics data!");
-							if (!mapData.paths) return alert("File did not contain map paths data!");
-							if (!mapData.text) return alert("File did not contain map text data!");
-						}
-
-						const maps = data.maps;
-						data.maps.sort((a, b) => SortUtil.ascSortLower(a.attributes.name || "", b.attributes.name || ""));
-
-						$lst.empty();
-						maps.forEach((m, i) => {
-							$lst.append(`
-									<label class="import-cb-label import-cb-label--img" data-listid="${i}">
-										<input type="checkbox">
-										<img class="import-label__img" src="${m.attributes.thumbnail}">
-										<span class="name col-9">${m.attributes.name}</span>
-									</label>
-								`);
-						});
-
-						const mapList = new List("map-importer-list", {
-							valueNames: ["name"]
-						});
-
-						$cbAll.prop("disabled", false).off("click").click(() => {
-							mapList.items.forEach(it => {
-								$(it.elm).find(`input[type="checkbox"]`).prop("checked", $cbAll.prop("checked"));
-							});
-						});
-
-						$btnImport.prop("disabled", false).off("click").click(() => {
-							$cbAll.prop("checked", false);
-							const sel = mapList.items
-								.filter(it => $(it.elm).find(`input`).prop("checked"))
-								.map(it => maps[$(it.elm).attr("data-listid")]);
-
-							if (!sel.length) return alert("No maps selected!");
-
-							const $name = $winProgress.find(`.name`);
-							const $remain = $winProgress.find(`.remaining`).text(`${sel.length} remaining...`);
-							const $errCount = $winProgress.find(`.errors`);
-							const $errReasons = $winProgress.find(`.error-names`);
-							let errCount = 0;
-
-							$winProgress.dialog("open");
-
-							const queue = sel;
-							let isCancelled = false;
-							let lastTimeout = null;
-							$btnCancel.off("click").click(() => {
-								isCancelled = true;
-								if (lastTimeout != null) {
-									clearTimeout(lastTimeout);
-									doImport();
-								}
-							});
-							const timeout = d20plus.getCfgVal("import", "importIntervalMap") || d20plus.getCfgDefaultVal("import", "importIntervalMap");
-
-							const doImport = () => {
-								if (isCancelled) {
-									$name.text("Import cancelled.");
-									$remain.text(`Cancelled with ${sel.length} remaining.`);
-								} else if (queue.length && !isCancelled) {
-									const mapData = queue.shift();
-									const name = mapData.attributes.name;
-									try {
-										$name.text(`Importing ${name}`);
-
-										const map = d20.Campaign.pages.create(mapData.attributes);
-										mapData.graphics.forEach(it => map.thegraphics.create(it));
-										mapData.paths.forEach(it => map.thepaths.create(it));
-										mapData.text.forEach(it => map.thetexts.create(it));
-										map.save();
-									} catch (e) {
-										console.error(e);
-
-										errCount++;
-										$errCount.text(errCount);
-										const prevReasons = $errReasons.text().trim();
-										$errReasons.append(`${prevReasons.length ? ", " : ""}${name}: "${e.message}"`)
-									}
-									$remain.text(`${sel.length} remaining...`);
-
-									// queue up the next import
-									lastTimeout = setTimeout(doImport, timeout);
-								} else {
-									$name.text("Import complete!");
-									$name.text(`${sel.length} remaining.`);
-								}
-							};
-
-							doImport();
-						});
-					}
-
-					const $btnLoadFile = $win.find(`[name="load-file"]`);
-					$btnLoadFile.off("click").click(() => {
-						DataUtil.userUpload((data) => handleLoadedData(data));
-					});
-
-					// shoutouts to Stormy for the following magic
-					const $btnExport = $win.find(`[name="export"]`);
-					$btnExport.off("click").click(() => {
-						const maps = d20.Campaign.pages.models.map(map => ({
-							attributes: map.attributes,
-							graphics: map.thegraphics.map(g => g.attributes),
-							text: map.thetexts.map(t => t.attributes),
-							paths: map.thepaths.map(p => p.attributes)
-						}));
-
-						// version number from r20es
-						const payload = {
-							schema_version: 1,
-							maps
-						};
-
-						const filename = document.title.replace(/\|\s*Roll20$/i, "").trim().replace(/[^\w\-]/g, "_");
-						const data = JSON.stringify(payload, null, "\t");
-
-						const blob = new Blob([data], {type: "application/json"})
-						d20plus.saveAs(blob, `${filename}.json`);
-					});
-				}
-			},
-			{
-				name: "Mass-Delete Pages",
-				desc: "Quickly delete multiple pages.",
-				html: `
-				<div id="d20plus-mass-page-delete" title="Mass-Delete Pages">
-					<div id="del-pages-list">
-						<div class="list" style="transform: translateZ(0); max-height: 490px; overflow-y: scroll; overflow-x: hidden; margin-bottom: 10px;"><i>Loading...</i></div>
-					</div>
-					<hr>
-					<p><label class="ib"><input type="checkbox" class="select-all"> Select All</label> | <button class="btn btn-danger deleter">Delete</button></p>
-					<p><i>This tool will delete neither your active page, nor a page active for players.</i></p>
-				</div>
-				`,
-				dialogFn: () => {
-					$("#d20plus-mass-page-delete").dialog({
-						autoOpen: false,
-						resizable: true,
-						width: 600,
-						height: 800,
-					});
-				},
-				openFn: () => {
-					function deletePage (model, pageList) {
-						if ($("#page-toolbar .availablepage[data-pageid=" + model.id + "]").remove()) {
-							var n = d20.Campaign.getPageIndex(model.id);
-							model.thegraphics.massdelete = true;
-							model.thetexts.massdelete = true;
-							model.thepaths.massdelete = true;
-							model.thegraphics.backboneFirebase.reference.set(null);
-							model.thetexts.backboneFirebase.reference.set(null);
-							model.thepaths.backboneFirebase.reference.set(null);
-							let i = d20.Campaign.get("playerspecificpages");
-							let o = false;
-							_.each(i, function(e, n) {
-								if (e === model.id) {
-									delete i[n];
-									o = true;
-								}
-							});
-							o && d20.Campaign.save({
-								playerspecificpages: i
-							});
-							model.destroy();
-							d20.Campaign.activePageIndex > n && (d20.Campaign.activePageIndex -= 1);
-
-							pageList.remove("page-id", model.id);
-						}
-					}
-
-					const $win = $("#d20plus-mass-page-delete");
-					$win.dialog("open");
-
-					const $lst = $win.find(`.list`).empty();
-
-					d20.Campaign.pages.models.forEach(m => {
-						$lst.append(`
-							<label class="import-cb-label import-cb-label--img" data-listid="${m.id}">
-								<input type="checkbox">
-								<img class="import-label__img" src="${m.attributes.thumbnail}">
-								<span class="name col-9">${m.attributes.name}</span>
-								<span style="display: none;" class="page-id">${m.id}</span>
-							</label>
-						`);
-					});
-
-					const pageList = new List("del-pages-list", {
-						valueNames: ["name", "page-id"]
-					});
-
-					const $cbAll = $win.find(`.select-all`).off("click").click(() => {
-						pageList.items.forEach(it => {
-							$(it.elm).find(`input[type="checkbox"]`).prop("checked", $cbAll.prop("checked"));
-						});
-					});
-
-					const $btnDel = $win.find(`.deleter`).off("click").click(() => {
-						const sel = pageList.items
-							.filter(it => $(it.elm).find(`input`).prop("checked"))
-							.map(it => $(it.elm).attr("data-listid"))
-							.map(pId => d20.Campaign.pages.models.find(it => it.id === pId))
-							.filter(it => it);
-
-						sel.forEach(m => {
-							if (m.id !== d20.Campaign.get("playerpageid") && m.id !== d20.Campaign.activePage().id) {
-								deletePage(m, pageList);
-							}
-						});
-						$cbAll.prop("checked", false);
-					});
-				}
-			},
-		],
-
-		addTools: () => {
-			const $body = $(`body`);
-			const $tools = $(`#d20-tools-list`);
-			const $toolsList = $tools.find(`.tools-list`);
-			d20plus.tools.sort((a, b) => SortUtil.ascSortLower(a.name || "", b.name || "")).forEach(t => {
-				$body.append(t.html); // add HTML
-				t.dialogFn(); // init window
-				// add tool row
-				const $wrp = $(`<div class="tool-row"/>`);
-				$wrp.append(`<span style="width: 20%; padding: 4px;">${t.name}</span>`);
-				$wrp.append(`<span style="width: calc(60% - 8px); padding: 4px;">${t.desc}</span>`);
-				$(`<a style="width: 15%;" class="btn" href="#">Open</a>`).on(mousedowntype, () => {
-					t.openFn.bind(t)();
-					$tools.dialog("close");
-				}).appendTo($wrp);
-				$toolsList.append($wrp);
-			});
-
-			$tools.dialog({
-				autoOpen: false,
-				resizable: true,
-				width: 800,
-				height: 650,
-			});
-			$(`#button-view-tools`).on(mousedowntype, () => {
-				$tools.dialog("open");
-			});
-		},
-
-		// ART /////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		art: {
-			button: () => {
-				// add external art button was clicked
-				const $art = $("#d20plus-artfolder");
-				$art.dialog("open");
-				const $artList = $art.find(`.list`);
-				$artList.empty();
-
-				if (d20plus.art.custom) {
-					d20plus.art.custom.forEach(a => {
-						const $liArt = getArtLi(a.name, a.url);
-						$artList.append($liArt);
-					});
-				}
-
-				// init list library
-				const artList = new List("art-list-container", {
-					valueNames: ["name"],
-					listClass: "artlist"
-				});
-
-				const $btnAdd = $(`#art-list-add-btn`);
-				const $iptAddName = $(`#art-list-add-name`);
-				const $iptAddUrl = $(`#art-list-add-url`);
-				$btnAdd.off("click");
-				$btnAdd.on("click", () => {
-					const name = $iptAddName.val().trim();
-					const url = $iptAddUrl.val().trim();
-					if (!name || !url) {
-						alert("Missing required fields!")
-					} else {
-						artList.search();
-						artList.filter();
-						const $liArt = getArtLi(name, url);
-						$artList.append($liArt);
-						refreshCustomArtList();
-					}
-				});
-
-				const $btnMassAdd = $(`#art-list-multi-add-btn`);
-				$btnMassAdd.off("click");
-				$btnMassAdd.on("click", () => {
-					$("#d20plus-artmassadd").dialog("open");
-					const $btnMassAddSubmit = $(`#art-list-multi-add-btn-submit`);
-					$btnMassAddSubmit.off("click");
-					$btnMassAddSubmit.on("click", () => {
-						artList.search();
-						artList.filter();
-						const $iptUrls = $(`#art-list-multi-add-area`);
-						const massUrls = $iptUrls.val();
-						const spl = massUrls.split("\n").map(s => s.trim()).filter(s => s);
-						if (!spl.length) return;
-						else {
-							const delim = "---";
-							const toAdd = [];
-							for (const s of spl) {
-								if (!s.includes(delim)) {
-									alert(`Badly formatted line: ${s}`)
-									return;
-								} else {
-									const parts = s.split(delim);
-									if (parts.length !== 2) {
-										alert(`Badly formatted line: ${s}`)
-										return;
-									} else {
-										toAdd.push({
-											name: parts[0],
-											url: parts[1]
-										});
-									}
-								}
-							}
-							toAdd.forEach(a => {
-								$artList.append(getArtLi(a.name, a.url));
-							});
-							refreshCustomArtList();
-							$("#d20plus-artmassadd").dialog("close");
-						}
-					});
-				});
-
-				makeDraggables();
-				d20plus.art.refreshList = refreshCustomArtList;
-
-				function getArtLi (name, url) {
-					const showImage = d20plus.getCfgVal("interface", "showCustomArtPreview");
-					const $liArt = $(`
-						<li class="dd-item library-item draggableresult Vetools-draggable-art ui-draggable" data-fullsizeurl="${url}">
-							${showImage ? `<img src="${url}" style="width: 30px; max-height: 30px; display: inline-block" draggable="false">` : ""}
-							<div class="dd-content name" style="display: inline-block; width: 35%;" data-url="${url}">${name}</div>
-							<a href="${url}"><span class="url" style="display: inline-block; width: ${showImage ? "40%" : "55%"};">${url}</span></a>
-						</li>
-					`);
-					if (!showImage) {
-						$liArt.on("mousedown", () => {
-							const $loader = $(`<div class="temp-warning">Loading image - don't drop yet!</div>`);
-							const $img = $(`<img src="${url}" style="width: 30px; max-height: 30px; display: none">`);
-							if (!$img.prop("complete")) {
-								$(`body`).append($loader);
-								$img.on("load", () => {
-									$loader.remove();
-								});
-								$loader.append($img);
-							}
-						});
-					}
-
-					const $btnDel = $(`<span class="delete btn btn-danger"><span class="pictos">#</span></span>`).on("click", () => {
-						$liArt.remove();
-						refreshCustomArtList();
-					});
-					$liArt.append($btnDel);
-					return $liArt;
-				}
-
-				function refreshCustomArtList () {
-					artList.reIndex();
-					const custom = [];
-					artList.items.forEach(i => {
-						const $ele = $(i.elm);
-						custom.push({
-							name: $ele.find(`.name`).text(),
-							url: $ele.find(`.url`).text()
-						});
-					});
-					d20plus.art.custom = custom;
-					makeDraggables();
-					saveToHandout();
-				}
-
-				function makeDraggables () {
-					$(`.Vetools-draggable-art`).draggable({
-						handle: ".dd-content",
-						revert: true,
-						revertDuration: 0,
-						helper: "clone",
-						appendTo: "body"
-					})
-				}
-
-				function saveToHandout () {
-					const handout = d20plus.getArtHandout();
-					if (!handout) {
-						d20.Campaign.handouts.create({
-							name: ART_HANDOUT
-						}, {
-							success: function (handout) {
-								notecontents = "This handout is used to store custom art URLs."
-
-								const gmnotes = JSON.stringify(d20plus.art.custom);
-								handout.updateBlobs({notes: notecontents, gmnotes: gmnotes});
-								handout.save({notes: (new Date).getTime(), inplayerjournals: ""});
-							}
-						});
-					} else {
-						const gmnotes = JSON.stringify(d20plus.art.custom);
-						handout.updateBlobs({gmnotes: gmnotes});
-						handout.save({notes: (new Date).getTime()});
-					}
-				}
-			},
-
-			// TODO load a decent default art library from somewhere
-			default: [
-				{
-					name: "Phoenix",
-					url: "http://www.discgolfbirmingham.com/wordpress/wp-content/uploads/2014/04/phoenix-rising.jpg"
-				}
-			]
-		},
-
-		getArtHandout: () => {
-			return d20.Campaign.handouts.models.find((handout) => {
-				return handout.attributes.name === ART_HANDOUT;
-			});
-		},
-
-		loadArt: (nextFn) => {
-			d20plus.log("Loading custom art");
-			const handout = d20plus.getArtHandout();
-			if (handout) {
-				handout.view.render();
-				handout._getLatestBlob("gmnotes", function (gmnotes) {
-					const decoded = decodeURIComponent(gmnotes);
-					try {
-						d20plus.art.custom = JSON.parse(decoded);
-						nextFn();
-					} catch (e) {
-						nextFn();
-					}
-				});
-			} else {
-				nextFn();
-			}
-		},
-
-		addCustomArtSearch: () => {
-			d20plus.log("Add custom art search");
-			const $afterTo = $(`#libraryresults`);
-			$afterTo.after(d20plus.artListHTML);
-
-			const $olNone = $(`#image-search-none`);
-			const $olHasResults = $(`#image-search-has-results`);
-
-			const $olArt = $(`#custom-art-results`);
-			const $srchImages = $(`#imagedialog .searchbox input.keywords`);
-			$srchImages.on("keyup", () => {
-				$olArt.empty();
-				const searched = $srchImages.val().trim().toLowerCase();
-				if (searched.length < 2) {
-					$olNone.show();
-					$olHasResults.hide();
-					return;
-				}
-
-				let toShow = d20plus.art.default.filter(a => a.name.toLowerCase().includes(searched));
-				if (d20plus.art.custom) toShow = toShow.concat(d20plus.art.custom.filter(a => a.name.toLowerCase().includes(searched)));
-
-				if (!toShow.length) {
-					$olNone.show();
-					$olHasResults.hide();
-				} else {
-					$olNone.hide();
-					$olHasResults.show();
-
-					toShow.forEach(a => {
-						$olArt.append(`
-				<li class="dd-item library-item draggableresult Vetoolsresult ui-draggable" data-fullsizeurl="${a.url}">
-					<div class="dd-content">
-						<div class="token"><img src="${a.url}" draggable="false"></div>
-						<div class="name">
-							<div class="namecontainer"><a href="${a.url}" rel="external">${a.name}</a></div>
-						</div>
-					</div>
-				</li>
-			`);
-					});
-				}
-
-				$("#imagedialog #Vetoolsresults .draggableresult").draggable({
-					handle: ".dd-content",
-					revert: true,
-					revertDuration: 0,
-					helper: "clone",
-					appendTo: "body"
-				}).addTouch();
-			});
-		},
-
-		initArtFromUrlButtons: () => {
-			d20plus.log("Add direct URL art buttons");
-			$("#tmpl_charactereditor").replaceWith(d20plus.template_charactereditor);
-			$("#tmpl_handouteditor").replaceWith(d20plus.template_handouteditor);
-
-			$(`.character-image-by-url`).live("click", function () {
-				const cId = $(this).closest(`[data-characterid]`).attr(`data-characterid`);
-				const url = window.prompt("Enter a URL", "https://example.com/pic.png");
-				if (url) {
-					d20.Campaign.characters.get(cId).set("avatar", url);
-				}
-			});
-
-			$(`.handout-image-by-url`).live("click", function () {
-				const hId = $(this).closest(`[data-handoutid]`).attr(`data-handoutid`);
-				const url = window.prompt("Enter a URL", "https://example.com/pic.png");
-				if (url) {
-					d20.Campaign.handouts.get(hId).set("avatar", url);
-				}
-			});
-
-			$(`.token-image-by-url`).live("click", function () {
-				const cId = $(this).closest(`[data-characterid]`).attr(`data-characterid`);
-				const url = window.prompt("Enter a URL", "https://example.com/pic.png");
-				if (url) {
-					const char = d20.Campaign.characters.get(cId);
-					char._getLatestBlob("defaulttoken", (blob) => {
-						blob = blob && blob.trim() ? JSON.parse(blob) : {};
-						blob.imgsrc = url;
-						char.updateBlobs({defaulttoken: JSON.stringify(blob)});
-					});
-				}
-			});
-		},
-
-		// UI ENHANCEMENTS /////////////////////////////////////////////////////////////////////////////////////////////////
-
-		addProFeatures: () => {
-			d20plus.log("Add Pro features");
-
-			// modified to allow players to use the FX tool, and to keep current colour selections when switching tool
-			// BEGIN ROLL20 CODE
-			function setMode (e) {
-				d20plus.log("Setting mode " + e);
-				// BEGIN MOD
-				// "text" === e || "rect" === e || "polygon" === e || "path" === e || "pan" === e || "select" === e || "targeting" === e || "measure" === e || window.is_gm || (e = "select"),
-				// END MOD
-				"text" == e ? $("#editor").addClass("texteditmode") : $("#editor").removeClass("texteditmode"),
-					$("#floatingtoolbar li").removeClass("activebutton"),
-					$("#" + e).addClass("activebutton"),
-				"fog" == e.substring(0, 3) && $("#fogcontrols").addClass("activebutton"),
-				"rect" == e && ($("#drawingtools").addClass("activebutton"),
-					$("#drawingtools").removeClass("text path polygon line_splitter").addClass("rect")),
-				"text" == e && ($("#drawingtools").addClass("activebutton"),
-					$("#drawingtools").removeClass("rect path polygon line_splitter").addClass("text")),
-				"path" == e && $("#drawingtools").addClass("activebutton").removeClass("text rect polygon line_splitter").addClass("path"),
-					"polygon" == e ? $("#drawingtools").addClass("activebutton").removeClass("text rect path line_splitter").addClass("polygon") : d20.engine.finishCurrentPolygon(),
-					// BEGIN MOD (also line_splitter added to above removeClass calls
-				"line_splitter" == e && ($("#drawingtools").addClass("activebutton"),
-					$("#drawingtools").removeClass("rect path polygon text").addClass("line_splitter")),
-					// END MOD
-				"pan" !== e && "select" !== e && d20.engine.unselect(),
-					"pan" == e ? ($("#select").addClass("pan").removeClass("select").addClass("activebutton"),
-						d20.token_editor.removeRadialMenu(),
-						$("#editor-wrapper").addClass("panning")) : $("#editor-wrapper").removeClass("panning"),
-				"select" == e && $("#select").addClass("select").removeClass("pan").addClass("activebutton"),
-					$("#floatingtoolbar .mode").hide(),
-				("text" == e || "select" == e) && $("#floatingtoolbar ." + e).show(),
-					"gridalign" == e ? $("#gridaligninstructions").show() : "gridalign" === d20.engine.mode && $("#gridaligninstructions").hide(),
-					"targeting" === e ? ($("#targetinginstructions").show(),
-						$("#upperCanvas").addClass("targeting"),
-						d20.engine.canvas.hoverCursor = "crosshair") : "targeting" === d20.engine.mode && ($("#targetinginstructions").hide(),
-						$("#upperCanvas").removeClass("targeting"),
-					d20.engine.nextTargetCallback && _.defer(function () {
-						d20.engine.nextTargetCallback && d20.engine.nextTargetCallback(!1)
-					}),
-						d20.engine.canvas.hoverCursor = "move"),
-					// BEGIN MOD
-					// console.log("Switch mode to " + e),
-					d20.engine.mode = e,
-				"measure" !== e && window.currentPlayer && d20.engine.measurements[window.currentPlayer.id] && !d20.engine.measurements[window.currentPlayer.id].sticky && (d20.engine.announceEndMeasure({
-					player: window.currentPlayer.id
-				}),
-					d20.engine.endMeasure()),
-				d20.engine.canvas.isDrawingMode = "path" == e ? !0 : !1;
-				if ("text" == e || "path" == e || "rect" == e || "polygon" == e || "fxtools" == e
-					// BEGIN MOD
-					|| "measure" == e) {
-					// END MOD
-					$("#secondary-toolbar").show();
-					$("#secondary-toolbar .mode").hide();
-					$("#secondary-toolbar ." + e).show();
-					("path" == e || "rect" == e || "polygon" == e) && ("" === $("#path_strokecolor").val() && ($("#path_strokecolor").val("#000000").trigger("change-silent"),
-						$("#path_fillcolor").val("transparent").trigger("change-silent")),
-						d20.engine.canvas.freeDrawingBrush.color = $("#path_strokecolor").val(),
-						d20.engine.canvas.freeDrawingBrush.fill = $("#path_fillcolor").val() || "transparent",
-						$("#path_width").trigger("change")),
-					"fxtools" == e && "" === $("#fxtools_color").val() && $("#fxtools_color").val("#a61c00").trigger("change-silent"),
-						$("#floatingtoolbar").trigger("blur")
-				} else {
-					$("#secondary-toolbar").hide();
-					$("#floatingtoolbar").trigger("blur");
-				}
-				// END MOD
-				// END ROLL20 CODE
-			}
-
-			d20plus.setMode = setMode;
-			window.setMode = setMode;
-
-			// rebind buttons with new setMode
-			const $drawTools = $("#drawingtools");
-			const $rect = $drawTools.find(".chooserect");
-			const $path = $drawTools.find(".choosepath");
-			const $poly = $drawTools.find(".choosepolygon");
-			$drawTools.unbind(clicktype).bind(clicktype, () => {
-				$(this).hasClass("rect") ? setMode("rect") : $(this).hasClass("text") ? setMode("text") : $(this).hasClass("path") ? setMode("path") : $(this).hasClass("drawselect") ? setMode("drawselect") : $(this).hasClass("polygon") && setMode("polygon")
-			});
-			$rect.unbind(clicktype).bind(clicktype, () => {
-				setMode("rect");
-				return false;
-			});
-			$path.unbind(clicktype).bind(clicktype, () => {
-				setMode("path");
-				return false;
-			});
-			$poly.unbind(clicktype).bind(clicktype, () => {
-				setMode("polygon");
-				return false;
-			});
-			$("#rect").unbind(clicktype).bind(clicktype, () => setMode("rect"));
-			$("#path").unbind(clicktype).bind(clicktype, () => setMode("path"));
-
-			if (!$(`#fxtools`).length) {
-				const $fxMode = $(`<li id="fxtools"/>`).append(`<span class="pictos">e</span>`);
-				$fxMode.on("click", () => {
-					d20plus.setMode("fxtools");
-				});
-				$(`#drawingtools`).after($fxMode);
-			}
-
-			// bind new hotkeys
-			Mousetrap.bind("q q", function () { // default ruler on q-q
-				setMode("measure");
-				$(`#measure_mode`).val("1").trigger("change");
-				return false;
-			})
-
-			Mousetrap.bind("q r", function () { // radius
-				setMode("measure");
-				$(`#measure_mode`).val("2").trigger("change");
-				return false;
-			})
-
-			Mousetrap.bind("q c", function () { // cone
-				setMode("measure");
-				$(`#measure_mode`).val("3").trigger("change");
-				return false;
-			})
-
-			Mousetrap.bind("q e", function () { // box
-				setMode("measure");
-				$(`#measure_mode`).val("4").trigger("change");
-				return false;
-			})
-
-			Mousetrap.bind("q w", function () { // line
-				setMode("measure");
-				$(`#measure_mode`).val("5").trigger("change");
-				return false;
-			})
-
-			if (window.is_gm) {
-				// add lighting layer tool
-				if (!$(`#editinglayer .choosewalls`).length) {
-					$(`#editinglayer .choosegmlayer`).after(`<li class="choosewalls"><span class="pictostwo">r</span> Dynamic Lighting</li>`);
-				}
-
-				// ensure tokens have editable sight
-				$("#tmpl_tokeneditor").replaceWith(d20plus.template_TokenEditor);
-				// show dynamic lighting/etc page settings
-				$("#tmpl_pagesettings").replaceWith(d20plus.template_pageSettings);
-				$("#page-toolbar").on("mousedown", ".settings", function () {
-					var e = d20.Campaign.pages.get($(this).parents(".availablepage").attr("data-pageid"));
-					e.view._template = $.jqotec("#tmpl_pagesettings");
-				});
-			}
-		},
-
-		enhanceMeasureTool: () => {
-			d20plus.log("Enhance Measure tool");
-
-			// add extra toolbar
-			const $wrpBar = $(`#secondary-toolbar`);
-			const toAdd = `
-				<ul class="mode measure" style="display: none;">
-					<li>
-						<select id="measure_mode" style="width: 100px;">
-							<option value="1" selected>Ruler</option>
-							<option value="2">Radius</option>
-							<option value="3">Cone</option>
-							<option value="4">Box</option>
-							<option value="5">Line</option>
-						</select>
-					</li>
-					<li class="measure_mode_sub measure_mode_sub_2" style="display: none;">
-						<select id="measure_mode_sel_2" style="width: 100px;">
-							<option value="1" selected>Burst</option>
-							<option value="2">Blast</option>
-						</select>
-					</li>
-					<li class="measure_mode_sub measure_mode_sub_3" style="display: none;">
-						<input type="number" min="0" id="measure_mode_ipt_3" style="width: 45px;" value="1">
-						<label style="display: inline-flex;" title="The PHB cone rules are the textbook definition of one radian.">rad.</label>
-						<select id="measure_mode_sel_3" style="width: 120px;">
-							<option value="1" selected>Edge: Flat</option>
-							<option value="2">Edge: Rounded</option>
-						</select>
-					</li>
-					<li class="measure_mode_sub measure_mode_sub_4" style="display: none;">
-						<select id="measure_mode_sel_4" style="width: 100px;">
-							<option value="1" selected>Burst</option>
-							<option value="2">Blast</option>
-						</select>
-					</li>
-					<li class="measure_mode_sub measure_mode_sub_5" style="display: none;">
-						<select id="measure_mode_sel_5" style="width: 120px;">
-							<option value="1" selected>Total Width: </option>
-							<option value="2">Width To Edge: </option>
-						</select>
-						<input type="number" min="0" id="measure_mode_ipt_5" style="width: 40px;" value="5">
-						<label style="display: inline-flex;">units</label>
-					</li>
-				</ul>`;
-			$wrpBar.append(toAdd);
-
-			$(`#measure`).click(() => {
-				d20plus.setMode("measure");
-			});
-			const $selMeasure = $(`#measure_mode`);
-			$selMeasure.on("change", () => {
-				$(`.measure_mode_sub`).hide();
-				$(`.measure_mode_sub_${$selMeasure.val()}`).show();
-			});
-
-			// 	const event = {
-			// 		type: "Ve_measure_clear_sticky",
-			// 		player: window.currentPlayer.id,
-			// 		time: (new Date).getTime()
-			// 	};
-			// 	d20.textchat.sendShout(event)
-
-			d20.textchat.shoutref.on("value", function(e) {
-				if (!d20.textchat.chatstartingup) {
-					var t = e.val();
-					if (t) {
-						const msg = JSON.parse(t);
-						if (window.DEBUG) console.log("SHOUT: ", msg);
-
-						switch (msg.type) {
-							// case "Ve_measure_clear_sticky": {
-							// 	delete d20plus._stickyMeasure[msg.player];
-							// 	d20.engine.debounced_renderTop();
-							// }
-						}
-					}
-				}
-			});
-
-			// ROLL20 CODE
-			var E = function(e, t) {
-				let n = {
-					scale: 0,
-					grid: 0
-				}
-					, i = 0
-					, o = -1;
-				_.each(t.waypoints, r=>{
-						let a = {
-							to_x: r[0],
-							to_y: r[1],
-							color: t.color,
-							flags: t.flags,
-							hide: t.hide
-						};
-						o > -1 ? (a.x = t.waypoints[o][0],
-							a.y = t.waypoints[o][1]) : (a.x = t.x,
-							a.y = t.y);
-						let s = S(e, a, !0, "nub", n, i);
-						n.scale += s.scale_distance,
-							n.grid += s.grid_distance,
-							i = s.diagonals % 2,
-							++o
-					}
-				);
-				let r = {
-					to_x: t.to_x,
-					to_y: t.to_y,
-					color: t.color,
-					flags: t.flags,
-					hide: t.hide,
-					Ve: t.Ve
-				};
-				-1 === o ? (r.x = t.x,
-					r.y = t.y) : (r.x = t.waypoints[o][0],
-					r.y = t.waypoints[o][1]),
-					S(e, r, !0, "arrow", n, i)
-			}
-
-			var S = function(e, t, n, i, o, r) {
-				let a = e=>e / d20.engine.canvasZoom
-					, s = d20.engine.getDistanceInScale({
-					x: t.x,
-					y: t.y
-				}, {
-					x: t.to_x,
-					y: t.to_y
-				}, r, 15 & t.flags);
-				e.globalCompositeOperation = "source-over",
-					e.strokeStyle = t.color,
-					e.fillStyle = e.strokeStyle,
-					e.lineWidth = a(3);
-				let l = {
-					line: [t.to_x - t.x, t.to_y - t.y],
-					arrow: [[-10.16, -24.53], [0, -20.33], [10.16, -24.53]],
-					x: [1, 0],
-					y: [0, 1]
-				};
-				if (e.beginPath(),
-					e.moveTo(t.x, t.y),
-					e.lineTo(t.to_x, t.to_y),
-				!0 === i || "arrow" === i) {
-					let n = Math.atan2(l.line[1], l.line[0]);
-					l.forward = [Math.cos(n), Math.sin(n)],
-						l.right = [Math.cos(n + Math.PI / 2), Math.sin(n + Math.PI / 2)],
-						l.arrow = _.map(l.arrow, e=>[d20.math.dot(e, l.right), d20.math.dot(e, l.forward)]),
-						l.arrow = _.map(l.arrow, e=>[d20.math.dot(e, l.x), d20.math.dot(e, l.y)]),
-						e.moveTo(t.to_x, t.to_y),
-						_.each(l.arrow, n=>e.lineTo(t.to_x + a(n[0]), t.to_y + a(n[1]))),
-						e.closePath(),
-						e.fill()
-				}
-				if (e.closePath(),
-					e.stroke(),
-				"nub" === i && (e.beginPath(),
-					e.arc(t.to_x, t.to_y, a(7), 0, 2 * Math.PI, !0),
-					e.closePath(),
-					e.fill()),
-					n) {
-					let n = Math.round(a(16))
-						, i = Math.round(a(14));
-					e.font = `${n}px Arial Black`,
-						e.textBaseline = "alphabetic",
-						e.textAlign = "center";
-					let r = {
-						distance: Math.round(10 * (s.scale_distance + (o ? o.scale : 0))) / 10,
-						units: d20.Campaign.activePage().get("scale_units")
-					};
-					r.text = `${r.distance} ${r.units}`,
-						r.text_metrics = e.measureText(r.text);
-					let l = {
-						active: d20.Campaign.activePage().get("showgrid") && d20.engine.snapTo > 0 && "sq" !== r.units && "hex" !== r.units,
-						text: ""
-					};
-					if (l.active) {
-						let t = d20.Campaign.activePage().get("grid_type")
-							, n = "hex" === t || "hexr" === t ? "hex" : "sq";
-						e.font = `${i}px Arial`,
-							l.distance = Math.round(10 * (s.grid_distance + (o ? o.grid : 0))) / 10,
-							l.text = `${l.distance} ${n}`,
-							l.text_metrics = e.measureText(l.text)
-					}
-					let c = n - Math.round(a(4))
-						, u = i - Math.round(a(3.5))
-						, d = {
-						x: t.to_x - Math.round(a(35)),
-						y: t.to_y - Math.round(a(35)),
-						width: Math.max(r.text_metrics.width, l.active ? l.text_metrics.width : 0),
-						height: c,
-						padding: Math.round(a(5)),
-						scale_baseline_offset: 0,
-						cell_baseline_offset: 0,
-						text_horizontal_offset: 0,
-						line_spacing: Math.ceil(a(4)),
-						image_width: a(20),
-						image_height: a(20),
-						image_padding_left: a(5)
-					};
-					d.height += 2 * d.padding,
-						d.width += 2 * d.padding,
-						d.text_horizontal_offset = .5 * d.width,
-						d.scale_baseline_offset = d.height - d.padding,
-					l.active && (d.height += u + d.line_spacing,
-						d.cell_baseline_offset = d.height - d.padding),
-					t.hide && (d.width += d.image_width + d.image_padding_left,
-						d.height = Math.max(d.height, d.image_height + 2 * d.padding),
-						d.text_width = Math.max(r.text_metrics.width, l.active ? l.text_metrics.width : 0)),
-						e.fillStyle = "rgba(255,255,255,0.75)",
-						e.fillRect(d.x, d.y, d.width, d.height),
-						e.fillStyle = "rgba(0,0,0,1)",
-						e.font = `${n}px Arial Black`,
-						e.fillText(r.text, d.x + d.text_horizontal_offset, d.y + d.scale_baseline_offset),
-						e.font = `${i}px Arial`,
-						e.fillText(l.text, d.x + d.text_horizontal_offset, d.y + d.cell_baseline_offset),
-					t.hide && (d.image_vertical_offset = .5 * d.height - .5 * d.image_height,
-						d.image_horizontal_offset = d.padding + d.text_width + d.image_padding_left,
-						e.drawImage($("#measure li.rulervisibility[mode='hide'] > img")[0], d.x + d.image_horizontal_offset, d.y + d.image_vertical_offset, d.image_width, d.image_height))
-				}
-
-				// BEGIN MOD
-				if (t.Ve) {
-					const RAD_90_DEG = 1.5708;
-
-					const euclid = (x1, y1, x2, y2) => {
-						const a = x1 - x2;
-						const b = y1 - y2;
-						return Math.sqrt(a * a + b * b)
-					};
-
-					const rotPoint = (angleRad, pX, pY) => {
-						const s = Math.sin(angleRad);
-						const c = Math.cos(angleRad);
-
-						pX -= t.x;
-						pY -= t.y;
-
-						const xNew = pX * c - pY * s;
-						const yNew = pX * s + pY * c;
-
-						pX = xNew + t.x;
-						pY = yNew + t.y;
-						return [pX, pY];
-					};
-
-					const getLineEquation = (x1, y1, x2, y2) => {
-						const getM = () => {
-							return (y2 - y1) / (x2 - x1)
-						};
-						const m = getM();
-
-						const getC = () => {
-							return y1 - (m * x1);
-						};
-
-						const c = getC();
-
-						return {
-							fn: (x) => (m * x) + c,
-							m, c
-						}
-					};
-
-					const getPerpLineEquation = (x, y, line) => {
-						const m2 = -1 / line.m
-						const c2 = y - (m2 * x);
-						return {
-							fn: (x) => (m2 * x) + c2,
-							m: m2, c: c2
-						}
-					};
-
-					const getIntersect = (pointPerp, line1, line2) => {
-						if (Math.abs(line1.m) === Infinity) {
-							// intersecting with the y-axis...
-							return [pointPerp[0], line2.fn(pointPerp[0])];
-						} else {
-							const x = (line2.c - line1.c) / (line1.m - line2.m);
-							const y = line1.fn(x);
-							return [x, y];
-						}
-					};
-
-					switch (t.Ve.mode) {
-						case "1": // standard ruler
-							break;
-						case "2": { // radius
-							const drawCircle = (cx, cy, rad) => {
-								e.beginPath();
-								e.arc(cx, cy, rad, 0, 2*Math.PI);
-								e.stroke();
-								e.closePath();
-							};
-
-							switch (t.Ve.radius.mode) {
-								case "1": // origin
-									drawCircle(t.x, t.y, euclid(t.x, t.y, t.to_x, t.to_y));
-									break;
-								case "2": { // halfway
-									const dx = t.to_x - t.x;
-									const dy = t.to_y - t.y;
-									const cX = t.x + (dx / 2);
-									const cY = t.y + (dy / 2);
-
-									drawCircle(cX, cY, euclid(cX, cY, t.to_x, t.to_y));
-									break;
-								}
-							}
-
-							break;
-						}
-						case "3": { // cone
-							const arcRadians = (Number(t.Ve.cone.arc) || 0.017) / 2; // 1 degree minimum
-
-							const r = euclid(t.x, t.y, t.to_x, t.to_y);
-							const dx = t.to_x - t.x;
-							const dy = t.to_y - t.y;
-							const startR = Math.atan2(dy, dx);
-
-							if (t.Ve.cone.mode === "1") {
-								const line = getLineEquation(t.x, t.y, t.to_x, t.to_y);
-								const perpLine = getPerpLineEquation(t.to_x, t.to_y, line);
-
-								const pRot1 = rotPoint(arcRadians, t.to_x, t.to_y);
-								const lineRot1 = getLineEquation(t.x, t.y, pRot1[0], pRot1[1]);
-								const intsct1 = getIntersect([t.to_x, t.to_y], perpLine, lineRot1);
-
-								// border line 1
-								e.beginPath();
-								e.moveTo(t.x, t.y);
-								e.lineTo(intsct1[0], intsct1[1]);
-								e.stroke();
-								e.closePath();
-
-								// perp line 1
-								e.beginPath();
-								e.moveTo(t.to_x, t.to_y);
-								e.lineTo(intsct1[0], intsct1[1]);
-								e.stroke();
-								e.closePath();
-
-								const pRot2 = rotPoint(-arcRadians, t.to_x, t.to_y);
-								const lineRot2 = getLineEquation(t.x, t.y, pRot2[0], pRot2[1]);
-								const intsct2 = getIntersect([t.to_x, t.to_y], perpLine, lineRot2);
-
-								// border line 2
-								e.beginPath();
-								e.moveTo(t.x, t.y);
-								e.lineTo(intsct2[0], intsct2[1]);
-								e.stroke();
-								e.closePath();
-
-								// perp line 2
-								e.beginPath();
-								e.moveTo(t.to_x, t.to_y);
-								e.lineTo(intsct2[0], intsct2[1]);
-								e.stroke();
-								e.closePath();
-							} else {
-								// arc 1
-								e.beginPath();
-								e.arc(t.x, t.y, r, startR, startR + arcRadians);
-								e.stroke();
-								e.closePath();
-								// arc 2
-								e.beginPath();
-								e.arc(t.x, t.y, r, startR, startR - arcRadians, true); // draw counter-clockwise
-								e.stroke();
-								e.closePath();
-
-								// border line 1
-								const s1 = Math.sin(arcRadians);
-								const c1 = Math.cos(arcRadians);
-								const xb1 = dx * c1 - dy * s1;
-								const yb1 = dx * s1 + dy * c1;
-								e.beginPath();
-								e.moveTo(t.x, t.y);
-								e.lineTo(t.x + xb1, t.y + yb1);
-								e.stroke();
-								e.closePath();
-
-								// border line 2
-								const s2 = Math.sin(-arcRadians);
-								const c2 = Math.cos(-arcRadians);
-								const xb2 = dx * c2 - dy * s2;
-								const yb2 = dx * s2 + dy * c2;
-								e.beginPath();
-								e.moveTo(t.x, t.y);
-								e.lineTo(t.x + xb2, t.y + yb2);
-								e.stroke();
-								e.closePath();
-							}
-							break;
-						}
-						case "4": { // box
-							const dxHalf = (t.to_x - t.x) / 2;
-							const dyHalf = (t.to_y - t.y) / 2;
-
-							e.beginPath();
-							switch (t.Ve.box.mode) {
-								case "1": // origin
-									const dx = t.to_x - t.x;
-									const dy = t.to_y - t.y;
-
-									const [x1, y1] = rotPoint(RAD_90_DEG, t.to_x, t.to_y);
-									const [x3, y3] = rotPoint(-RAD_90_DEG, t.to_x, t.to_y);
-
-									e.moveTo(x1, y1);
-									e.lineTo(x1 + dx, y1 + dy);
-									e.lineTo(x3 + dx, y3 + dy);
-									e.lineTo(x3 - dx, y3 - dy);
-									e.lineTo(x1 - dx, y1 - dy);
-									e.lineTo(x1 + dx, y1 + dy);
-
-									break;
-								case "2": { // halfway
-									const [x1, y1] = rotPoint(RAD_90_DEG, t.to_x - dxHalf, t.to_y - dyHalf);
-									const [x3, y3] = rotPoint(-RAD_90_DEG, t.to_x - dxHalf, t.to_y - dyHalf);
-
-									e.moveTo(t.x, t.y);
-									e.lineTo(x1, y1);
-									e.lineTo(x3, y3);
-
-									const dx3 = (x3 - t.x);
-									const dy3 = (y3 - t.y);
-									e.lineTo(t.to_x + dx3, t.to_y + dy3);
-
-									const dx1 = (x1 - t.x);
-									const dy1 = (y1 - t.y);
-									e.lineTo(t.to_x + dx1, t.to_y + dy1);
-
-									e.lineTo(x1, y1);
-
-									break;
-								}
-							}
-							e.stroke();
-							e.closePath();
-							break;
-						}
-						case "5": { // line
-							e.beginPath();
-
-							const div = t.Ve.line.mode === "2" ? 1 : 2;
-
-							const norm = [];
-							d20plus.math.normalize(norm, [t.to_x - t.x, t.to_y - t.y]);
-							const width = (Number(t.Ve.line.width) || 0.1) / div;
-							const scaledWidth = (width / d20.Campaign.activePage().get("scale_number")) * 70;
-							d20plus.math.scale(norm, norm, scaledWidth);
-
-							const xRot = t.x + norm[0];
-							const yRot = t.y + norm[1];
-
-							const [x1, y1] = rotPoint(RAD_90_DEG, xRot, yRot);
-							const [x3, y3] = rotPoint(-RAD_90_DEG, xRot, yRot);
-							console.log(t.x, t.y, norm, xRot, yRot);
-
-							e.moveTo(t.x, t.y);
-							e.lineTo(x1, y1);
-							e.lineTo(x3, y3);
-
-							const dx3 = (x3 - t.x);
-							const dy3 = (y3 - t.y);
-							e.lineTo(t.to_x + dx3, t.to_y + dy3);
-
-							const dx1 = (x1 - t.x);
-							const dy1 = (y1 - t.y);
-							e.lineTo(t.to_x + dx1, t.to_y + dy1);
-
-							e.lineTo(x1, y1);
-
-							e.stroke();
-							e.closePath();
-							break;
-						}
-					}
-				}
-				// END MOD
-
-				return s
-			};
-			d20.engine.drawMeasurements = function (e) {
-				e.globalCompositeOperation = "source-over",
-					e.globalAlpha = 1,
-					_.each(d20.engine.measurements, function(t) {
-						if (t.pageid !== d20.Campaign.activePage().id)
-							return;
-						let n = {
-							color: d20.Campaign.players.get(t.player).get("color"),
-							to_x: t.to_x - d20.engine.currentCanvasOffset[0],
-							to_y: t.to_y - d20.engine.currentCanvasOffset[1],
-							x: t.x - d20.engine.currentCanvasOffset[0],
-							y: t.y - d20.engine.currentCanvasOffset[1],
-							flags: t.flags,
-							hide: t.hide,
-							waypoints: _.map(t.waypoints, e=>[e[0] - d20.engine.currentCanvasOffset[0], e[1] - d20.engine.currentCanvasOffset[1]])
-							// BEGIN MOD
-							,
-							Ve: t.Ve ? JSON.parse(JSON.stringify(t.Ve)) : undefined
-							// END MOD
-						};
-						E(e, n)
-					})
-
-				// BEGIN MOD
-				const offset = (num, offset, xy) => {
-					return (num + offset[xy]) - d20.engine.currentCanvasOffset[xy];
-				};
-
-				// unrelated code, but throw it in the render loop here
-				let doRender = false;
-				$.each(d20plus._tempTopRenderLines, (id, toDraw) => {
-					console.log("DRAWING", toDraw.ticks, toDraw.offset)
-					e.beginPath();
-					e.strokeStyle = window.currentPlayer.get("color");
-					e.lineWidth = 2;
-
-					const nuX = offset(toDraw.x - d20.engine.currentCanvasOffset[0], toDraw.offset, 0);
-					const nuY = offset(toDraw.y - d20.engine.currentCanvasOffset[1], toDraw.offset, 1);
-					const nuToX = offset(toDraw.to_x - d20.engine.currentCanvasOffset[0], toDraw.offset, 0);
-					const nuToY = offset(toDraw.to_y - d20.engine.currentCanvasOffset[1], toDraw.offset, 1);
-
-					e.moveTo(nuX, nuY);
-					e.lineTo(nuToX, nuToY);
-
-					e.moveTo(nuToX, nuY);
-					e.lineTo(nuX, nuToY);
-
-					e.stroke();
-					e.closePath();
-
-					toDraw.ticks--;
-					doRender = true;
-					if (toDraw.ticks <= 0) {
-						delete d20plus._tempTopRenderLines[id];
-					}
-				});
-				if (doRender) {
-					d20.engine.debounced_renderTop()
-				}
-				// END MOD
-			}
-			// END ROLL20 CODE
-		},
-
-		_addStatusEffectEntries: () => {
-			const sheetUrl = window.is_gm ? d20plus.getCfgVal("token", "statusSheetUrl") || d20plus.getCfgDefaultVal("token", "statusSheetUrl"): window.Campaign.attributes.bR20cfg_statussheet;
-
-			const temp = new Image();
-			temp.onload = () => {
-				const xSize = 34;
-				const iMin = 47;
-				// const iMax = 101;
-				const iMax = Math.ceil(temp.width / xSize); // round the last one up to a full image
-				for (let i = iMin; i < iMax; ++i) {
-					d20.token_editor.statusmarkers["5etools_" + (i - iMin)] = String(i * xSize);
-				}
-			};
-			temp.src = sheetUrl;
-
-			$(`#5etools-status-css`).html(`#radial-menu .markermenu .markericon {
-				background-image: url(${sheetUrl});
-			}`);
-		},
-
-		_removeStatusEffectEntries: () => {
-			$(`#5etools-status-css`).html("");
-			Object.keys(d20.token_editor.statusmarkers).filter(k => k.startsWith("5etools_")).forEach(k => delete d20.token_editor.statusmarkers[k]);
-		},
-
-		enhanceStatusEffects: () => {
-			d20plus.log("Enhance status effects");
-			$(`head`).append(`<style id="5etools-status-css"/>`);
-			d20plus._handleStatusTokenConfigChange();
-
-			function overwriteStatusEffects () {
-				d20.engine.canvasDirty = true;
-				d20.engine.canvasTopDirty = true;
-				d20.engine.canvas._objects.forEach(it => {
-					// avoid adding it to any objects that wouldn't have it to begin with
-					if (!it.model || !it.model.view || !it.model.view.updateBackdrops) return;
-
-					it.model.view.updateBackdrops = function (e) {
-						if (!this.nohud && ("objects" == this.model.get("layer") || "gmlayer" == this.model.get("layer")) && "image" == this.model.get("type") && this.model && this.model.collection && this.graphic) {
-							// BEGIN MOD
-							const scaleFact = (d20plus.getCfgVal("canvas", "scaleNamesStatuses") && d20.Campaign.activePage().get("snapping_increment"))
-								? d20.Campaign.activePage().get("snapping_increment")
-								: 1;
-							// END MOD
-							var t = this.model.collection.page
-								, n = e || d20.engine.canvas.getContext();
-							n.save(),
-							(this.graphic.get("flipX") || this.graphic.get("flipY")) && n.scale(this.graphic.get("flipX") ? -1 : 1, this.graphic.get("flipY") ? -1 : 1);
-							var i = this
-								, r = Math.floor(this.graphic.get("width") / 2)
-								, o = Math.floor(this.graphic.get("height") / 2)
-								, a = (parseFloat(t.get("scale_number")),
-								this.model.get("statusmarkers").split(","));
-							-1 !== a.indexOf("dead") && (n.strokeStyle = "rgba(189,13,13,0.60)",
-								n.lineWidth = 10,
-								n.beginPath(),
-								n.moveTo(-r + 7, -o + 15),
-								n.lineTo(r - 7, o - 5),
-								n.moveTo(r - 7, -o + 15),
-								n.lineTo(-r + 7, o - 5),
-								n.closePath(),
-								n.stroke()),
-								n.rotate(-this.graphic.get("angle") * Math.PI / 180),
-								n.strokeStyle = "rgba(0,0,0,0.65)",
-								n.lineWidth = 1;
-							var s = 0
-								, l = i.model.get("bar1_value")
-								, c = i.model.get("bar1_max");
-							if ("" != c && (window.is_gm || this.model.get("showplayers_bar1") || this.model.currentPlayerControls() && this.model.get("playersedit_bar1"))) {
-								var u = parseInt(l, 10) / parseInt(c, 10)
-									, d = -o - 20 + 0;
-								n.fillStyle = "rgba(" + d20.Campaign.tokendisplay.bar1_rgb + ",0.75)",
-									n.beginPath(),
-									n.rect(-r + 3, d, Math.floor((2 * r - 6) * u), 8),
-									n.closePath(),
-									n.fill(),
-									n.beginPath(),
-									n.rect(-r + 3, d, 2 * r - 6, 8),
-									n.closePath(),
-									n.stroke(),
-									s++
-							}
-							var l = i.model.get("bar2_value")
-								, c = i.model.get("bar2_max");
-							if ("" != c && (window.is_gm || this.model.get("showplayers_bar2") || this.model.currentPlayerControls() && this.model.get("playersedit_bar2"))) {
-								var u = parseInt(l, 10) / parseInt(c, 10)
-									, d = -o - 20 + 12;
-								n.fillStyle = "rgba(" + d20.Campaign.tokendisplay.bar2_rgb + ",0.75)",
-									n.beginPath(),
-									n.rect(-r + 3, d, Math.floor((2 * r - 6) * u), 8),
-									n.closePath(),
-									n.fill(),
-									n.beginPath(),
-									n.rect(-r + 3, d, 2 * r - 6, 8),
-									n.closePath(),
-									n.stroke(),
-									s++
-							}
-							var l = i.model.get("bar3_value")
-								, c = i.model.get("bar3_max");
-							if ("" != c && (window.is_gm || this.model.get("showplayers_bar3") || this.model.currentPlayerControls() && this.model.get("playersedit_bar3"))) {
-								var u = parseInt(l, 10) / parseInt(c, 10)
-									, d = -o - 20 + 24;
-								n.fillStyle = "rgba(" + d20.Campaign.tokendisplay.bar3_rgb + ",0.75)",
-									n.beginPath(),
-									n.rect(-r + 3, d, Math.floor((2 * r - 6) * u), 8),
-									n.closePath(),
-									n.fill(),
-									n.beginPath(),
-									n.rect(-r + 3, d, 2 * r - 6, 8),
-									n.closePath(),
-									n.stroke()
-							}
-							var h, p, g = 1, f = !1;
-							switch (d20.Campaign.get("markers_position")) {
-								case "bottom":
-									h = o - 10,
-										p = r;
-									break;
-								case "left":
-									h = -o - 10,
-										p = -r,
-										f = !0;
-									break;
-								case "right":
-									h = -o - 10,
-										p = r - 18,
-										f = !0;
-									break;
-								default:
-									h = -o + 10,
-										p = r
-							}
-							// BEGIN MOD
-							n.strokeStyle = "white";
-							n.lineWidth = 3 * scaleFact;
-							const scaledFont = 14 * scaleFact;
-							n.font = "bold " + scaledFont + "px Arial";
-							// END MOD
-							_.each(a, function (e) {
-								var t = d20.token_editor.statusmarkers[e.split("@")[0]];
-								if (!t)
-									return !0;
-								if ("dead" === e)
-									return !0;
-								var i = 0;
-								if (g--,
-									"#" === t.substring(0, 1))
-									n.fillStyle = t,
-										n.beginPath(),
-										f ? h += 16 : p -= 16,
-										n.arc(p + 8, f ? h + 4 : h, 6, 0, 2 * Math.PI, !0),
-										n.closePath(),
-										n.stroke(),
-										n.fill(),
-										i = f ? 10 : 4;
-								else {
-									// BEGIN MOD
-									if (!d20.token_editor.statussheet_ready) return;
-									const scaledWH = 21 * scaleFact;
-									const scaledOffset = 22 * scaleFact;
-									f ? h += scaledOffset : p -= scaledOffset;
-
-									if (d20.engine.canvasZoom <= 1) {
-										n.drawImage(d20.token_editor.statussheet_small, parseInt(t, 10), 0, 21, 21, p, h - 9, scaledWH, scaledWH);
-									} else {
-										n.drawImage(d20.token_editor.statussheet, parseInt(t, 10), 0, 24, 24, p, h - 9, scaledWH, scaledWH)
-									}
-
-									i = f ? 14 : 12;
-									i *= scaleFact;
-									// END MOD
-								}
-								if (-1 !== e.indexOf("@")) {
-									var r = e.split("@")[1];
-									// BEGIN MOD
-									// bing backtick to "clear counter"
-									if (r === "`") return;
-									n.fillStyle = "rgb(222,31,31)";
-									var o = f ? 9 : 14;
-									o *= scaleFact;
-									o -= (14 - (scaleFact * 14));
-									n.strokeText(r + "", p + i, h + o);
-									n.fillText(r + "", p + i, h + o);
-									// END MOD
-								}
-							});
-							var m = i.model.get("name");
-							if ("" != m && 1 == this.model.get("showname") && (window.is_gm || this.model.get("showplayers_name") || this.model.currentPlayerControls() && this.model.get("playersedit_name"))) {
-								n.textAlign = "center";
-								// BEGIN MOD
-								var y = 14 * scaleFact;
-								const scaledY = 22 * scaleFact;
-								const scaled6 = 6 * scaleFact;
-								const scaled8 = 8 * scaleFact;
-								n.font = "bold " + y + "px Arial";
-								var v = n.measureText(m).width;
-								n.fillStyle = "rgba(255,255,255,0.50)";
-								n.fillRect(-1 * Math.floor((v + scaled6) / 2), o + scaled8, v + scaled6, y + scaled6);
-								n.fillStyle = "rgb(0,0,0)";
-								n.fillText(m + "", 0, o + scaledY, v);
-								// END MOD
-							}
-							n.restore()
-						}
-					}
-				});
-			}
-
-			overwriteStatusEffects();
-
-			d20.engine.canvas.off("object:added");
-			d20.engine.canvas.on("object:added", overwriteStatusEffects);
-
-			// the holy trinity
-			// d20.engine.canvas.on("object:removed", () => console.log("added"));
-			// d20.engine.canvas.on("object:removed", () => console.log("removed"));
-			// d20.engine.canvas.on("object:modified", () => console.log("modified"));
-
-			$(document).off("mouseenter", ".markermenu");
-			$(document).on("mouseenter", ".markermenu", function () {
-				var e = this;
-				$(this).on("mouseover.statusiconhover", ".statusicon", function () {
-					a = $(this).attr("data-action-type").replace("toggle_status_", "")
-				}),
-					$(document).on("keypress.statusnum", function (t) {
-						// BEGIN MOD // TODO see if this clashes with keyboard shortcuts
-						if ("dead" !== a && currentcontexttarget) {
-							// END MOD
-							var n = String.fromCharCode(t.which)
-								,
-								i = "" == currentcontexttarget.model.get("statusmarkers") ? [] : currentcontexttarget.model.get("statusmarkers").split(",")
-								, r = (_.map(i, function (e) {
-									return e.split("@")[0]
-								}),
-									!1);
-							i = _.map(i, function (e) {
-								return e.split("@")[0] == a ? (r = !0,
-								a + "@" + n) : e
-							}),
-							r || ($(e).find(".statusicon[data-action-type=toggle_status_" + a + "]").addClass("active"),
-								i.push(a + "@" + n)),
-								currentcontexttarget.model.save({
-									statusmarkers: i.join(",")
-								})
-						}
-					})
-			})
-		},
-
-		enhancePageSelector: () => {
-			d20plus.log("Enhancing page selector");
-			var updatePageOrder = function () {
-				d20plus.log("Saving page order...");
-				var pos = 0;
-				$("#page-toolbar .pages .chooseablepage").each(function () {
-					var page = d20.Campaign.pages.get($(this).attr("data-pageid"));
-					page && page.save({
-						placement: pos
-					});
-					pos++;
-				});
-				d20.pagetoolbar.noReload = false;
-				d20.pagetoolbar.refreshPageListing();
-			}
-
-			function overwriteDraggables () {
-				// make them draggable on both axes
-				$("#page-toolbar .pages").sortable("destroy");
-				$("#page-toolbar .pages").sortable({
-					items: "> .chooseablepage",
-					start: function () {
-						d20.pagetoolbar.noReload = true;
-					},
-					stop: function () {
-						updatePageOrder()
-					},
-					distance: 15
-				}).addTouch();
-				$("#page-toolbar .playerbookmark").draggable("destroy");
-				$("#page-toolbar .playerbookmark").draggable({
-					revert: "invalid",
-					appendTo: "#page-toolbar",
-					helper: "original"
-				}).addTouch();
-				$("#page-toolbar .playerspecificbookmark").draggable("destroy");
-				$("#page-toolbar .playerspecificbookmark").draggable({
-					revert: "invalid",
-					appendTo: "#page-toolbar",
-					helper: "original"
-				}).addTouch();
-			}
-
-			overwriteDraggables();
-			$(`#page-toolbar`).css("top", "calc(-90vh + 40px)");
-
-			const originalFn = d20.pagetoolbar.refreshPageListing;
-			d20.pagetoolbar.refreshPageListing = () => {
-				originalFn();
-				// original function is debounced at 100ms, so debounce this at 110ms and hope for the best
-				_.debounce(() => {
-					overwriteDraggables();
-				}, 110)();
-			}
-		},
-
-		initQuickSearch: ($iptSearch, $outSearch) => {
-			$iptSearch.on("keyup", () => {
-				const searchVal = ($iptSearch.val() || "").trim();
-				$outSearch.empty();
-				if (searchVal.length <= 2) return; // ignore 2 characters or less, for performance reasons
-				const found = $(`#journal .content`).find(`li[data-itemid]`).filter((i, ele) => {
-					const $ele = $(ele);
-					return $ele.find(`.name`).text().trim().toLowerCase().includes(searchVal.toLowerCase());
-				});
-				if (found.length) {
-					$outSearch.append(`<p><b>Search results:</b></p>`);
-					const $outList = $(`<ol class="dd-list Vetools-search-results"/>`);
-					$outSearch.append($outList);
-					found.clone().addClass("Vetools-draggable").appendTo($outList);
-					$outSearch.append(`<hr>`);
-					$(`.Vetools-search-results .Vetools-draggable`).draggable({
-						revert: true,
-						distance: 10,
-						revertDuration: 0,
-						helper: "clone",
-						handle: ".namecontainer",
-						appendTo: "body",
-						scroll: true,
-						start: function () {
-							$("#journalfolderroot").addClass("externaldrag")
-						},
-						stop: function () {
-							$("#journalfolderroot").removeClass("externaldrag")
-						}
-					});
-				}
-			});
-		},
-
-		addSelectedTokenCommands: () => {
-			d20plus.log("Add token rightclick commands");
-			$("#tmpl_actions_menu").replaceWith(d20plus.template_actionsMenu);
-
-			Mousetrap.bind("b b", function () { // back on layer
-				const n = d20plus._getSelectedToMove();
-				d20plus.backwardOneLayer(n);
-				return false;
-			});
-
-			Mousetrap.bind("b f", function () { // forward one layer
-				const n = d20plus._getSelectedToMove();
-				d20plus.forwardOneLayer(n);
-				return false;
-			});
-
-			// BEGIN ROLL20 CODE
-			var e, t = !1, n = [];
-			var i = function() {
-				t && (t.remove(),
-					t = !1),
-				e && clearTimeout(e)
-			};
-			var r = function (r) {
-				var o, a;
-				r.changedTouches && r.changedTouches.length > 0 ? (o = r.changedTouches[0].pageX,
-					a = r.changedTouches[0].pageY) : (o = r.pageX,
-					a = r.pageY),
-					i(),
-					n = [];
-				for (var s = [], l = d20.engine.selected(), c = 0; c < l.length; c++)
-					n.push(l[c]),
-						s.push(l[c].type);
-				if (s = _.uniq(s),
-					n.length > 0)
-					if (1 == s.length) {
-						var u = n[0];
-						t = $("image" == u.type && 0 == u.model.get("isdrawing") ? $("#tmpl_actions_menu").jqote(u.model) : $("#tmpl_actions_menu").jqote(u.model))
-					} else {
-						var u = n[0];
-						t = $($("#tmpl_actions_menu").jqote(u.model))
-					}
-				else
-					t = $($("#tmpl_actions_menu").jqote({}));
-				if (!window.is_gm && t[0].lastElementChild.childElementCount < 1)
-					return !1;
-				t.appendTo("body");
-				var d = t.height()
-					, h = t.width()
-					, p = {};
-				return p.top = a > $("#editor-wrapper").height() - $("#playerzone").height() - d - 100 ? a - d + "px" : a + "px",
-					p.left = o > $("#editor-wrapper").width() - h ? o + 10 - h + "px" : o + 10 + "px",
-					t.css(p),
-					$(".actions_menu").bind("mousedown mouseup touchstart", function(e) {
-						e.stopPropagation()
-					}),
-					$(".actions_menu ul > li").bind("mouseover touchend", function() {
-						if (e && (clearTimeout(e),
-								e = !1),
-							$(this).parents(".hasSub").length > 0)
-							;
-						else if ($(this).hasClass("hasSub")) {
-							$(".actions_menu").css({
-								width: "215px",
-								height: "250px"
-							});
-							var t = this;
-							_.defer(function() {
-								$(".actions_menu ul.submenu").hide(),
-									$(t).find("ul.submenu:hidden").show()
-							})
-						} else
-							$(".actions_menu ul.submenu").hide()
-					}),
-					$(".actions_menu ul.submenu").live("mouseover", function() {
-						e && (clearTimeout(e),
-							e = !1)
-					}),
-					$(".actions_menu, .actions_menu ul.submenu").live("mouseleave", function() {
-						e || (e = setTimeout(function() {
-							$(".actions_menu ul.submenu").hide(),
-								$(".actions_menu").css("width", "100px").css("height", "auto"),
-								e = !1
-						}, 500))
-					}),
-					$(".actions_menu li").on(clicktype, function() {
-						var e = $(this).attr("data-action-type");
-						if (null != e) {
-							if ("copy" == e)
-								d20.clipboard.doCopy(),
-									i();
-							else if ("paste" == e)
-								d20.clipboard.doPaste(),
-									i();
-							else if ("delete" == e) {
-								var t = d20.engine.selected();
-								d20.engine.canvas.deactivateAllWithDispatch();
-								for (var r = 0; r < t.length; r++)
-									t[r].model.destroy();
-								i()
-							} else if ("undo" == e)
-								d20.undo && d20.undo.doUndo(),
-									i();
-							else if ("tofront" == e)
-								d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
-									_.each(n, function(e) {
-										d20.engine.canvas.bringToFront(e)
-									}),
-									d20.Campaign.activePage().debounced_recordZIndexes(),
-									i();
-							else if ("toback" == e)
-								d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
-									_.each(n, function(e) {
-										d20.engine.canvas.sendToBack(e)
-									}),
-									d20.Campaign.activePage().debounced_recordZIndexes(),
-									i();
-							else if (-1 !== e.indexOf("tolayer_")) {
-								d20.engine.unselect();
-								var o = e.replace("tolayer_", "");
-								_.each(n, function(e) {
-									e.model.save({
-										layer: o
-									})
-								}),
-									i(),
-									d20.token_editor.removeRadialMenu()
-							} else if ("addturn" == e)
-								_.each(n, function(e) {
-									d20.Campaign.initiativewindow.addTokenToList(e.model.id)
-								}),
-									i(),
-								d20.tutorial && d20.tutorial.active && $(document.body).trigger("addedTurn");
-							else if ("group" == e) {
-								var a = [];
-								d20.engine.unselect(),
-									_.each(n, function(e) {
-										a.push(e.model.id)
-									}),
-									_.each(n, function(e) {
-										e.model.addToGroup(a)
-									}),
-									i();
-								var s = n[0];
-								d20.engine.select(s)
-							} else if ("ungroup" == e)
-								d20.engine.unselect(),
-									_.each(n, function(e) {
-										e.model.clearGroup()
-									}),
-									d20.token_editor.removeRadialMenu(),
-									i();
-							else if ("toggledrawing" == e)
-								d20.engine.unselect(),
-									_.each(n, function(e) {
-										e.model.set({
-											isdrawing: !e.model.get("isdrawing")
-										}).save()
-									}),
-									i(),
-									d20.token_editor.removeRadialMenu();
-							else if ("toggleflipv" == e)
-								d20.engine.unselect(),
-									_.each(n, function(e) {
-										e.model.set({
-											flipv: !e.model.get("flipv")
-										}).save()
-									}),
-									i(),
-									d20.token_editor.removeRadialMenu();
-							else if ("togglefliph" == e)
-								d20.engine.unselect(),
-									_.each(n, function(e) {
-										e.model.set({
-											fliph: !e.model.get("fliph")
-										}).save()
-									}),
-									i(),
-									d20.token_editor.removeRadialMenu();
-							else if ("takecard" == e)
-								d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
-									_.each(n, function(e) {
-										var t = d20.decks.cardByID(e.model.get("cardid"));
-										if (e.model.get("isdrawing") === !1)
-											var n = {
-												bar1_value: e.model.get("bar1_value"),
-												bar1_max: e.model.get("bar1_max"),
-												bar2_value: e.model.get("bar2_value"),
-												bar2_max: e.model.get("bar2_max"),
-												bar3_value: e.model.get("bar3_value"),
-												bar3_max: e.model.get("bar3_max")
-											};
-										d20.Campaign.hands.addCardToHandForPlayer(t, window.currentPlayer, n ? n : void 0),
-											_.defer(function() {
-												e.model.destroy()
-											})
-									}),
-									d20.engine.unselect(),
-									i();
-							else if ("flipcard" == e)
-								d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
-									_.each(n, function(e) {
-										var t = e.model.get("sides").split("|")
-											, n = e.model.get("currentSide")
-											, i = n + 1;
-										i > t.length - 1 && (i = 0),
-											e.model.set({
-												currentSide: i,
-												imgsrc: unescape(t[i])
-											}).save()
-									}),
-									i();
-							else if ("setdimensions" == e) {
-								var l = n[0]
-									, c = $($("#tmpl_setdimensions").jqote()).dialog({
-									title: "Set Dimensions",
-									width: 325,
-									height: 225,
-									buttons: {
-										Set: function() {
-											var e, t;
-											"pixels" == c.find(".dimtype").val() ? (e = parseInt(c.find("input.width").val(), 10),
-												t = parseInt(c.find("input.height").val(), 10)) : (e = parseFloat(c.find("input.width").val()) * window.dpi,
-												t = parseFloat(c.find("input.height").val()) * window.dpi),
-												l.model.save({
-													width: e,
-													height: t
-												}),
-												c.off("change"),
-												c.dialog("destroy").remove()
-										},
-										Cancel: function() {
-											c.off("change"),
-												c.dialog("destroy").remove()
-										}
-									},
-									beforeClose: function() {
-										c.off("change"),
-											c.dialog("destroy").remove()
-									}
-								});
-								c.on("change", ".dimtype", function() {
-									"pixels" == $(this).val() ? (c.find("input.width").val(Math.round(l.get("width"))),
-										c.find("input.height").val(Math.round(l.get("height")))) : (c.find("input.width").val(l.get("width") / window.dpi),
-										c.find("input.height").val(l.get("height") / window.dpi))
-								}),
-									c.find(".dimtype").trigger("change"),
-									i()
-							} else if ("aligntogrid" == e)
-								if (0 === d20.Campaign.activePage().get("snapping_increment")) {
-									i();
-									var u = $($("#tmpl_grid-disabled").jqote(h)).dialog({
-										title: "Grid Off",
-										buttons: {
-											Ok: function() {
-												u.off("change"),
-													u.dialog("destroy").remove()
-											}
-										},
-										beforeClose: function() {
-											u.off("change"),
-												u.dialog("destroy").remove()
-										}
-									})
-								} else
-									d20.engine.gridaligner.target = n[0],
-										d20plus.setMode("gridalign"),
-										i();
-							else if ("side_random" == e) {
-								d20.engine.canvas.getActiveGroup() && d20.engine.unselect();
-								var d = [];
-								_.each(n, function(e) {
-									if (e.model && "" != e.model.get("sides")) {
-										var t = e.model.get("sides").split("|")
-											, n = t.length
-											, i = d20.textchat.diceengine.random(n);
-
-										const imgUrl = unescape(t[i]);
-										e.model.save(getRollableTokenUpdate(imgUrl, i)),
-											d.push(t[i])
-									}
-								}),
-									d20.textchat.rawChatInput({
-										type: "tokenroll",
-										content: d.join("|")
-									}),
-									i()
-							} else if ("side_choose" == e) {
-								var l = n[0]
-									, h = l.model.toJSON()
-									, p = h.currentSide;
-								h.sidesarray = h.sides.split("|");
-								var c = $($("#tmpl_chooseside").jqote(h)).dialog({
-									title: "Choose Side",
-									width: 325,
-									height: 225,
-									buttons: {
-										Choose: function() {
-											const imgUrl = unescape(h.sidesarray[p]);
-											d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
-												l.model.save(getRollableTokenUpdate(imgUrl, p)),
-												l = null,
-												h = null,
-												c.off("slide"),
-												c.dialog("destroy").remove()
-										},
-										Cancel: function() {
-											l = null,
-												h = null,
-												c.off("slide"),
-												c.dialog("destroy").remove()
-										}
-									},
-									beforeClose: function() {
-										l = null,
-											h = null,
-											c.off("slide"),
-											c.dialog("destroy").remove()
-									}
-								});
-								c.find(".sideslider").slider({
-									min: 0,
-									max: h.sidesarray.length - 1,
-									step: 1,
-									value: h.currentSide
-								}),
-									c.on("slide", function(e, t) {
-										t.value != p && (p = t.value,
-											c.find(".sidechoices .sidechoice").hide().eq(t.value).show())
-									}),
-									c.find(".sidechoices .sidechoice").hide().eq(h.currentSide).show(),
-									i()
-							}
-							// BEGIN MOD
-							const showRollOptions = (formula, options) => {
-								const sel = d20.engine.selected();
-
-								options = options.map(it => `<option>${it}</option>`);
-
-								const dialog= $("<div><p style='font-size: 1.15em;'><strong>" + d20.utils.strip_tags("Select Save") + ":</strong> <select style='width: 150px; margin-left: 5px;'>" + options.join("") + "</select></p></div>");
-
-								dialog.dialog({
-									title: "Input Value",
-									beforeClose: function() {
-										return false;
-									},
-									buttons: {
-										Submit: function() {
-											const val = dialog.find("select").val();
-											console.log(val);
-											d20.engine.unselect();
-											sel.forEach(it => {
-												d20.engine.select(it);
-												const toRoll = formula(it, val);
-												d20.textchat.doChatInput(toRoll);
-												d20.engine.unselect();
-											});
-
-											dialog.off();
-											dialog.dialog("destroy").remove();
-											d20.textchat.$textarea.focus();
-										},
-										Cancel: function() {
-											dialog.off();
-											dialog.dialog("destroy").remove();
-										}
-									}
-								});
-
-								i();
-							};
-
-							if ("rollsaves" === e) {
-								const options = ["str", "dex", "con", "int", "wis", "cha"].map(it => Parser.attAbvToFull(it));
-								showRollOptions(
-									(token, val) => `@{selected|wtype} &{template:simple} {{charname=@{selected|token_name}}} {{always=1}} {{rname=${val} Save}} {{mod=@{selected|${val.toLowerCase()}_save_bonus}}} {{r1=[[1d20+@{selected|${val.toLowerCase()}_save_bonus}]]}} {{r2=[[1d20+@{selected|${val.toLowerCase()}_save_bonus}]]}}`,
-									options
-								);
-							} else if ("rollinit" === e) {
-								const sel = d20.engine.selected();
-								d20.engine.unselect();
-								sel.forEach(it => {
-									d20.engine.select(it);
-									const toRoll = `@{selected|wtype} &{template:simple} {{rname=Initiative}} {{charname=@{selected|token_name}}} {{mod=[[@{selected|initiative_bonus}]]}} {{r1=[[@{selected|d20}+@{selected|dexterity_mod} &{tracker}]]}}{{normal=1}}`;
-									d20.textchat.doChatInput(toRoll);
-									d20.engine.unselect();
-								});
-								i();
-							} else if ("rollskills" === e) {
-								const options = [
-									"Athletics",
-									"Acrobatics",
-									"Sleight of Hand",
-									"Stealth",
-									"Arcana",
-									"History",
-									"Investigation",
-									"Nature",
-									"Religion",
-									"Animal Handling",
-									"Insight",
-									"Medicine",
-									"Perception",
-									"Survival",
-									"Deception",
-									"Intimidation",
-									"Performance",
-									"Persuasion"
-								].sort();
-
-								showRollOptions(
-									(token, val) => {
-										const clean = val.toLowerCase().replace(/ /g, "_");
-										const abil = `${Parser.attAbvToFull(Parser.skillToAbilityAbv(val.toLowerCase())).toLowerCase()}_mod`;
-
-										const doRoll = (atb = abil) => {
-											return `@{selected|wtype} &{template:simple} {{charname=@{selected|token_name}}} {{always=1}} {{rname=${val}}} {{mod=@{selected|${atb}}}} {{r1=[[1d20+@{selected|${atb}}]]}} {{r2=[[1d20+@{selected|${atb}}]]}}`;
-										}
-
-										try {
-											if (token && token.model && token.model.toJSON && token.model.toJSON().represents) {
-												const charIdMaybe = token.model.toJSON().represents;
-												if (!charIdMaybe) return doRoll();
-												const charMaybe = d20.Campaign.characters.get(charIdMaybe);
-												if (charMaybe) {
-													const atbs = charMaybe.attribs.toJSON();
-													const npcAtbMaybe = atbs.find(it => it.name === "npc");
-
-													if (npcAtbMaybe && npcAtbMaybe.current == 1) {
-														const npcClean = `npc_${clean}`;
-														const bonusMaybe = atbs.find(it => it.name === npcClean);
-														if (bonusMaybe) return doRoll(npcClean);
-														else return doRoll();
-													} else {
-														const pcClean = `${clean}_bonus`;
-														const bonusMaybe = atbs.find(it => it.name === pcClean);
-														if (bonusMaybe) return doRoll(pcClean);
-														else return doRoll();
-													}
-												} else return doRoll();
-											} else return doRoll();
-										} catch (x) {
-											console.error(x);
-											return doRoll();
-										}
-									},
-									options
-								);
-							} else if ("forward-one" === e) {
-								d20plus.forwardOneLayer(n);
-								i();
-							} else if ("back-one" === e) {
-								d20plus.backwardOneLayer(n);
-								i();
-							} else if ("rollertokenresize" === e) {
-								resizeToken();
-								i();
-							}
-							// END MOD
-							return !1
-						}
-					}),
-					!1
-			};
-			// END ROLL20 CODE
-
-			function getRollableTokenUpdate (imgUrl, curSide) {
-				const m = /\?roll20_token_size=(.*)/.exec(imgUrl);
-				const toSave = {
-					currentSide: curSide,
-					imgsrc: imgUrl
-				};
-				if (m) {
-					toSave.width = 70 * Number(m[1]);
-					toSave.height = 70 * Number(m[1])
-				}
-				return toSave;
-			}
-
-			function resizeToken () {
-				const sel = d20.engine.selected();
-
-				const options = [["Tiny", 0.5], ["Small", 1], ["Medium", 1], ["Large", 2], ["Huge", 3], ["Gargantuan", 4], ["Colossal", 5]].map(it => `<option value='${it[1]}'>${it[0]}</option>`);
-				const dialog = $(`<div><p style='font-size: 1.15em;'><strong>${d20.utils.strip_tags("Select Size")}:</strong> <select style='width: 150px; margin-left: 5px;'>${options.join("")}</select></p></div>`);
-				dialog.dialog({
-					title: "New Size",
-					beforeClose: function () {
-						return false;
-					},
-					buttons: {
-						Submit: function () {
-							const size = dialog.find("select").val();
-							d20.engine.unselect();
-							sel.forEach(it => {
-								const nxtSize = size * 70;
-								const sides = it.model.get("sides");
-								if (sides) {
-									const ueSides = unescape(sides);
-									const cur = it.model.get("currentSide");
-									const split = ueSides.split("|");
-									if (split[cur].includes("roll20_token_size")) {
-										split[cur] = split[cur].replace(/(\?roll20_token_size=).*/, `$1${size}`);
-									} else {
-										split[cur] += `?roll20_token_size=${size}`;
-									}
-									const toSaveSides = split.map(it => escape(it)).join("|");
-									const toSave = {
-										sides: toSaveSides,
-										width: nxtSize,
-										height: nxtSize
-									};
-									console.log(`Updating token:`, toSave);
-									it.model.save(toSave);
-								} else {
-									console.warn("Token had no side data!")
-								}
-							});
-							dialog.off();
-							dialog.dialog("destroy").remove();
-							d20.textchat.$textarea.focus();
-						},
-						Cancel: function () {
-							dialog.off();
-							dialog.dialog("destroy").remove();
-						}
-					}
-				});
-			}
-
-			d20.token_editor.showContextMenu = r;
-			d20.token_editor.closeContextMenu = i;
-			$(`#editor-wrapper`).on("click", d20.token_editor.closeContextMenu);
-		},
-
-		_getSelectedToMove () {
-			const n = [];
-			for (var l = d20.engine.selected(), c = 0; c < l.length; c++)
-				n.push(l[c]);
-		},
-
-		forwardOneLayer (n) {
-			d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
-				_.each(n, function (e) {
-					d20.engine.canvas.bringForward(e)
-				}),
-				d20.Campaign.activePage().debounced_recordZIndexes()
-		},
-
-		backwardOneLayer (n) {
-			d20.engine.canvas.getActiveGroup() && d20.engine.unselect(),
-				_.each(n, function (e) {
-					d20.engine.canvas.sendBackwards(e)
-				}),
-				d20.Campaign.activePage().debounced_recordZIndexes()
-		},
-
-		_tempTopRenderLines: {}, // format: {x: ..., y: ..., to_x: ..., to_y: ..., ticks: ..., offset: ...}
-		// previously "enhanceSnap"
-		enhanceMouseDown: () => {
-			/**
-			 * Dumb variable names copy-pasted from uglified code
-			 * @param c x co-ord
-			 * @param u y c-ord
-			 * @returns {*[]} 2-len array; [0] = x and [1] = y
-			 */
-			function getClosestHexPoint (c, u) {
-				function getEuclidDist (x1, y1, x2, y2) {
-					return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
-				}
-
-				const hx = d20.canvas_overlay.activeHexGrid.GetHexAt({
-					X: c,
-					Y: u
-				});
-
-				let minDist = 1000000;
-				let minPoint = [c, u];
-
-				function checkDist(x1, y1) {
-					const dist = getEuclidDist(x1, y1, c, u);
-					if (dist < minDist) {
-						minDist =  dist;
-						minPoint = [x1, y1];
-					}
-				}
-				hx.Points.forEach(pt => {
-					checkDist(pt.X, pt.Y);
-				});
-				checkDist(hx.MidPoint.X, hx.MidPoint.Y);
-
-				return minPoint;
-			}
-
-			// BEGIN ROLL20 CODE
-			const R = function(e) {
-				//BEGIN MOD
-				var t = d20.engine.canvas;
-				var a = $("#editor-wrapper");
-				// END MOD
-				var n, o;
-				if (d20.tddice && d20.tddice.handleInteraction && d20.tddice.handleInteraction(),
-					e.touches) {
-					if ("pan" == d20.engine.mode)
-						return;
-					e.touches.length > 1 && (C = d20.engine.mode,
-						d20.engine.mode = "pan",
-						d20.engine.leftMouseIsDown = !0),
-						d20.engine.lastTouchStarted = (new Date).getTime(),
-						n = e.touches[0].pageX,
-						o = e.touches[0].pageY,
-						e.preventDefault()
-				} else
-					n = e.pageX,
-						o = e.pageY;
-				for (var r = d20.engine.showLastPaths.length; r--;)
-					"selected" == d20.engine.showLastPaths[r].type && d20.engine.showLastPaths.splice(r, 1);
-				d20.engine.handleMetaKeys(e),
-				"select" != d20.engine.mode && "path" != d20.engine.mode || t.__onMouseDown(e),
-				(0 === e.button || e.touches && 1 == e.touches.length) && (d20.engine.leftMouseIsDown = !0),
-				2 === e.button && (d20.engine.rightMouseIsDown = !0);
-				var s = Math.floor(n / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0] / d20.engine.canvasZoom)
-					,
-					l = Math.floor(o / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1] / d20.engine.canvasZoom);
-				if (d20.engine.lastMousePos = [s, l],
-					d20.engine.mousePos = [s, l],
-				!d20.engine.leftMouseIsDown || "fog-reveal" != d20.engine.mode && "fog-hide" != d20.engine.mode && "gridalign" != d20.engine.mode) {
-					if (d20.engine.leftMouseIsDown && "fog-polygonreveal" == d20.engine.mode) {
-						// BEGIN MOD
-						var c = s;
-						var u = l;
-
-						if (0 != d20.engine.snapTo && (e.shiftKey && !d20.Campaign.activePage().get("adv_fow_enabled") || !e.shiftKey && d20.Campaign.activePage().get("adv_fow_enabled"))) {
-							if ("square" == d20.Campaign.activePage().get("grid_type")) {
-								c = d20.engine.snapToIncrement(c, d20.engine.snapTo);
-								u = d20.engine.snapToIncrement(u, d20.engine.snapTo);
-							} else {
-								const minPoint = getClosestHexPoint(c, u);
-								c = minPoint[0];
-								u = minPoint[1];
-							}
-						}
-
-						if (d20.engine.fog.points.length > 0 && Math.abs(d20.engine.fog.points[0][0] - c) + Math.abs(d20.engine.fog.points[0][1] - u) < 15) {
-							d20.engine.fog.points.push([d20.engine.fog.points[0][0], d20.engine.fog.points[0][1]]);
-							d20.engine.finishPolygonReveal();
-						} else {
-							d20.engine.fog.points.push([c, u]);
-						}
-						d20.engine.drawOverlays();
-						// END MOD
-					} else if (d20.engine.leftMouseIsDown && "measure" == d20.engine.mode)
-						if (2 === e.button)
-							d20.engine.addWaypoint(e);
-						else {
-							d20.engine.measure.sticky && d20.engine.endMeasure(),
-								d20.engine.measure.down[0] = s,
-								d20.engine.measure.down[1] = l,
-								d20.engine.measure.sticky = e.shiftKey;
-							let t = d20.Campaign.activePage().get("grid_type")
-								, n = "snap_center" === d20.engine.ruler_snapping && !e.altKey;
-							if (n |= "no_snap" === d20.engine.ruler_snapping && e.altKey,
-								n &= 0 !== d20.engine.snapTo)
-								if ("square" === t)
-									d20.engine.measure.down[1] = d20.engine.snapToIncrement(d20.engine.measure.down[1] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2),
-										d20.engine.measure.down[0] = d20.engine.snapToIncrement(d20.engine.measure.down[0] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2);
-								else {
-									var d = d20.canvas_overlay.activeHexGrid.GetHexAt({
-										X: d20.engine.measure.down[0],
-										Y: d20.engine.measure.down[1]
-									});
-									d20.engine.measure.down[1] = d.MidPoint.Y,
-										d20.engine.measure.down[0] = d.MidPoint.X
-								}
-							else if (0 === d20.engine.snapTo || "snap_corner" !== d20.engine.ruler_snapping || e.altKey)
-								d20.engine.measure.flags |= 1;
-							else {
-								if ("square" === t)
-									d20.engine.measure.down[0] = d20.engine.snapToIncrement(d20.engine.measure.down[0], d20.engine.snapTo),
-										d20.engine.measure.down[1] = d20.engine.snapToIncrement(d20.engine.measure.down[1], d20.engine.snapTo);
-								else {
-									let e = d20.engine.snapToHexCorner([d20.engine.measure.down[0], d20.engine.measure.down[1]]);
-									e && (d20.engine.measure.down[0] = e[0],
-										d20.engine.measure.down[1] = e[1])
-								}
-								d20.engine.measure.flags |= 1
-							}
-						}
-					else if (d20.engine.leftMouseIsDown && "fxtools" == d20.engine.mode)
-						d20.engine.fx.current || (d20.engine.fx.current = d20.fx.handleClick(s, l));
-					else if (d20.engine.leftMouseIsDown && "text" == d20.engine.mode) {
-						var h = {
-							fontFamily: $("#font-family").val(),
-							fontSize: $("#font-size").val(),
-							fill: $("#font-color").val(),
-							text: "",
-							left: s,
-							top: l
-						}
-							, p = d20.Campaign.activePage().addText(h);
-						_.defer(function () {
-							d20.engine.editText(p.view.graphic, h.top, h.left),
-								setTimeout(function () {
-									$(".texteditor").focus()
-								}, 300)
-						})
-					} else if (d20.engine.leftMouseIsDown && "rect" == d20.engine.mode) {
-						var f = parseInt($("#path_width").val(), 10)
-							, g = d20.engine.drawshape.shape = {
-							strokewidth: f,
-							x: 0,
-							y: 0,
-							width: 10,
-							height: 10,
-							type: e.altKey ? "circle" : "rect"
-						};
-						c = s,
-							u = l;
-						0 != d20.engine.snapTo && e.shiftKey && (c = d20.engine.snapToIncrement(c, d20.engine.snapTo),
-							u = d20.engine.snapToIncrement(u, d20.engine.snapTo)),
-							g.x = c,
-							g.y = u,
-							g.fill = $("#path_fillcolor").val(),
-							g.stroke = $("#path_strokecolor").val(),
-							d20.engine.drawshape.start = [n + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0], o + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1]],
-							d20.engine.renderTop()
-					} else if (d20.engine.leftMouseIsDown && "polygon" == d20.engine.mode) {
-						if (d20.engine.drawshape.shape)
-							g = d20.engine.drawshape.shape;
-						else {
-							f = parseInt($("#path_width").val(), 10);
-							(g = d20.engine.drawshape.shape = {
-								strokewidth: f,
-								points: [],
-								type: "polygon"
-							}).fill = $("#path_fillcolor").val(),
-								g.stroke = $("#path_strokecolor").val()
-						}
-						// BEGIN MOD
-						var c = s;
-						var u = l;
-
-						if (0 != d20.engine.snapTo && e.shiftKey) {
-							if ("square" == d20.Campaign.activePage().get("grid_type")) {
-								c = d20.engine.snapToIncrement(c, d20.engine.snapTo);
-								u = d20.engine.snapToIncrement(u, d20.engine.snapTo);
-							} else {
-								const minPoint = getClosestHexPoint(c, u);
-								c = minPoint[0];
-								u = minPoint[1];
-							}
-						}
-
-						if (g.points.length > 0 && Math.abs(g.points[0][0] - c) + Math.abs(g.points[0][1] - u) < 15) {
-							g.points.push([g.points[0][0], g.points[0][1]]);
-							if (g.points.length > 2) {
-								g.points.push([g.points[1][0], g.points[1][1]]);
-							}
-							d20.engine.finishCurrentPolygon();
-						} else {
-							g.points.push([c, u]);
-						}
-
-						d20.engine.debounced_renderTop();
-						// END MOD
-					} else if (d20.engine.leftMouseIsDown && "targeting" === d20.engine.mode) {
-						var m = d20.engine.canvas.findTarget(e, !0, !0);
-						return void (m !== undefined && "image" === m.type && m.model && d20.engine.nextTargetCallback(m))
-					}
-					// BEGIN MOD
-					else if (d20.engine.leftMouseIsDown && "line_splitter" === d20.engine.mode) {
-						const lastPoint = {x: d20.engine.lastMousePos[0], y: d20.engine.lastMousePos[1]};
-						(d20.engine.canvas._objects || []).forEach(o => {
-							if (o.type === "path" && o.containsPoint(lastPoint)) {
-								const asObj = o.toObject();
-								const anyCurves = asObj.path.filter(it => it instanceof Array && it.length > 0  && it[0] === "C");
-								if (!anyCurves.length) {
-									// PathMath expects these
-									o.model.set("_pageid", d20.Campaign.activePage().get("id"));
-									o.model.set("_path", JSON.stringify(o.path));
-
-									console.log("SPLITTING PATH: ", o.model.toJSON());
-									const mainPath = o.model;
-
-									// BEGIN PathSplitter CODE
-									let mainSegments = PathMath.toSegments(mainPath);
-									// BEGIN MOD
-									// fake a tiny diagonal line
-									const SLICE_LEN = 10;
-									const slicePoint1 = [lastPoint.x + (SLICE_LEN / 2), lastPoint.y + (SLICE_LEN / 2), 1];
-									const slicePoint2 = [lastPoint.x - (SLICE_LEN / 2), lastPoint.y - (SLICE_LEN / 2), 1];
-									const nuId = d20plus.generateRowId();
-									d20plus._tempTopRenderLines[nuId] = {
-										ticks: 2,
-										x: slicePoint1[0],
-										y: slicePoint1[1],
-										to_x: slicePoint2[0],
-										to_y: slicePoint2[1],
-										offset: [...d20.engine.currentCanvasOffset]
-									};
-									setTimeout(() => {
-										d20.engine.debounced_renderTop();
-									}, 1);
-									let splitSegments = [
-										[slicePoint1, slicePoint2]
-									];
-									// END MOD
-									let segmentPaths = _getSplitSegmentPaths(mainSegments, splitSegments);
-
-									// (function moved into this scope)
-									function _getSplitSegmentPaths(mainSegments, splitSegments) {
-										let resultSegPaths = [];
-										let curPathSegs = [];
-
-										_.each(mainSegments, seg1 => {
-
-											// Find the points of intersection and their parametric coefficients.
-											let intersections = [];
-											_.each(splitSegments, seg2 => {
-												let i = PathMath.segmentIntersection(seg1, seg2);
-												if(i) intersections.push(i);
-											});
-
-											if(intersections.length > 0) {
-												// Sort the intersections in the order that they appear along seg1.
-												intersections.sort((a, b) => {
-													return a[1] - b[1];
-												});
-
-												let lastPt = seg1[0];
-												_.each(intersections, i => {
-													// Complete the current segment path.
-													curPathSegs.push([lastPt, i[0]]);
-													resultSegPaths.push(curPathSegs);
-
-													// Start a new segment path.
-													curPathSegs = [];
-													lastPt = i[0];
-												});
-												curPathSegs.push([lastPt, seg1[1]]);
-											}
-											else {
-												curPathSegs.push(seg1);
-											}
-										});
-										resultSegPaths.push(curPathSegs);
-
-										return resultSegPaths;
-									};
-									// (end function moved into this scope)
-
-									// Convert the list of segment paths into paths.
-									let _pageid = mainPath.get('_pageid');
-									let controlledby = mainPath.get('controlledby');
-									let fill = mainPath.get('fill');
-									let layer = mainPath.get('layer');
-									let stroke = mainPath.get('stroke');
-									let stroke_width = mainPath.get('stroke_width');
-
-									let results = [];
-									_.each(segmentPaths, segments => {
-										// BEGIN MOD
-										if (!segments) {
-											d20plus.chatLog(`A path had no segments! This is probably a bug. Please report it.`);
-											return;
-										}
-										// END MOD
-
-										let pathData = PathMath.segmentsToPath(segments);
-										_.extend(pathData, {
-											_pageid,
-											controlledby,
-											fill,
-											layer,
-											stroke,
-											stroke_width
-										});
-										let path = createObj('path', pathData);
-										results.push(path);
-									});
-
-									// Remove the original path and the splitPath.
-									// BEGIN MOD
-									mainPath.destroy();
-									// END MOD
-									// END PathSplitter CODE
-								}
-							}
-						});
-					}
-					// END MOD
-				} else
-					d20.engine.fog.down[0] = s,
-						d20.engine.fog.down[1] = l,
-					0 != d20.engine.snapTo && "square" == d20.Campaign.activePage().get("grid_type") && ("gridalign" == d20.engine.mode ? e.shiftKey && (d20.engine.fog.down[0] = d20.engine.snapToIncrement(d20.engine.fog.down[0], d20.engine.snapTo),
-						d20.engine.fog.down[1] = d20.engine.snapToIncrement(d20.engine.fog.down[1], d20.engine.snapTo)) : (e.shiftKey && !d20.Campaign.activePage().get("adv_fow_enabled") || !e.shiftKey && d20.Campaign.activePage().get("adv_fow_enabled")) && (d20.engine.fog.down[0] = d20.engine.snapToIncrement(d20.engine.fog.down[0], d20.engine.snapTo),
-						d20.engine.fog.down[1] = d20.engine.snapToIncrement(d20.engine.fog.down[1], d20.engine.snapTo)));
-				if (window.currentPlayer && d20.engine.leftMouseIsDown && "select" == d20.engine.mode) {
-					if (2 === e.button && d20.engine.addWaypoint(e),
-					d20.engine.pings[window.currentPlayer.id] && d20.engine.pings[window.currentPlayer.id].radius > 20)
-						return;
-					var y = {
-						left: s,
-						top: l,
-						radius: -5,
-						player: window.currentPlayer.id,
-						pageid: d20.Campaign.activePage().id,
-						currentLayer: window.currentEditingLayer
-					};
-					window.is_gm && e.shiftKey && (y.scrollto = !0),
-						d20.engine.pings[window.currentPlayer.id] = y,
-						d20.engine.pinging = {
-							downx: n,
-							downy: o
-						},
-						d20.engine.renderTop()
-				}
-				d20.engine.rightMouseIsDown && ("select" == d20.engine.mode || "path" == d20.engine.mode || "text" == d20.engine.mode) || d20.engine.leftMouseIsDown && "pan" == d20.engine.mode ? (d20.engine.pan.beginPos = [a.scrollLeft(), a.scrollTop()],
-					d20.engine.pan.panXY = [n, o],
-					d20.engine.pan.panning = !0) : d20.engine.pan.panning = !1,
-				2 === e.button && !d20.engine.leftMouseIsDown && d20.engine.measurements[window.currentPlayer.id] && d20.engine.measurements[window.currentPlayer.id].sticky && (d20.engine.endMeasure(),
-					d20.engine.announceEndMeasure({
-						player: window.currentPlayer.id
-					})),
-					// BEGIN MOD
-				$(`#upperCanvas`).hasClass("hasfocus") || $(`#upperCanvas`).focus()
-				// END MOD
-			};
-			// END ROLL20 CODE
-
-			if (UPPER_CANVAS_MOUSEDOWN) {
-				d20plus.log("Enhancing hex snap");
-				d20.engine.uppercanvas.removeEventListener("mousedown", UPPER_CANVAS_MOUSEDOWN);
-				d20.engine.uppercanvas.addEventListener("mousedown", R);
-			}
-
-			// add half-grid snap
-			d20.engine.snapToIncrement = function(e, t) {
-				if (d20plus.getCfgVal("canvas", "halfGridSnap")) {
-					t = t / 2;
-				}
-				return t * Math.round(e / t);
-			}
-		},
-
-		enhanceMouseUp: () => { // P
-
-		},
-
-		enhanceMouseMove: () => {
-			// needs to be called after `enhanceMeasureTool()`
-			const $selMeasureMode = $(`#measure_mode`);
-			const $selRadMode = $(`#measure_mode_sel_2`);
-			const $iptConeWidth = $(`#measure_mode_ipt_3`);
-			const $selConeMode = $(`#measure_mode_sel_3`);
-			const $selBoxMode = $(`#measure_mode_sel_4`);
-			const $selLineMode = $(`#measure_mode_sel_5`);
-			const $iptLineWidth = $(`#measure_mode_ipt_5`);
-
-			// BEGIN ROLL20 CODE
-			var x = function(e) {
-				e.type = "measuring",
-					e.time = (new Date).getTime(),
-					d20.textchat.sendShout(e)
-			}
-				, k = _.throttle(x, 200)
-				, E = function(e) {
-				k(e),
-				d20.tutorial && d20.tutorial.active && $(document.body).trigger("measure"),
-					d20.engine.receiveMeasureUpdate(e)
-			};
-			// END ROLL20 CODE
-
-			// add missing vars
-			var t = d20.engine.canvas;
-			var a = $("#editor-wrapper");
-
-			// BEGIN ROLL20 CODE
-			const A = function(e) {
-				var n, i;
-				if (e.changedTouches ? ((e.changedTouches.length > 1 || "pan" == d20.engine.mode) && (delete d20.engine.pings[window.currentPlayer.id],
-					d20.engine.pinging = !1),
-					e.preventDefault(),
-					n = e.changedTouches[0].pageX,
-					i = e.changedTouches[0].pageY) : (n = e.pageX,
-					i = e.pageY),
-				"select" != d20.engine.mode && "path" != d20.engine.mode && "targeting" != d20.engine.mode || t.__onMouseMove(e),
-				d20.engine.leftMouseIsDown || d20.engine.rightMouseIsDown) {
-					var o = Math.floor(n / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0] / d20.engine.canvasZoom)
-						, r = Math.floor(i / d20.engine.canvasZoom + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1] / d20.engine.canvasZoom);
-					if (d20.engine.mousePos = [o, r],
-					!d20.engine.leftMouseIsDown || "fog-reveal" != d20.engine.mode && "fog-hide" != d20.engine.mode && "gridalign" != d20.engine.mode) {
-						if (d20.engine.leftMouseIsDown && "measure" == d20.engine.mode && d20.engine.measure.down[0] !== undefined && d20.engine.measure.down[1] !== undefined) {
-							d20.engine.measure.down[2] = o,
-								d20.engine.measure.down[3] = r,
-								d20.engine.measure.sticky |= e.shiftKey;
-							let t = d20.Campaign.activePage().get("grid_type")
-								, n = "snap_corner" === d20.engine.ruler_snapping && !e.altKey && 0 !== d20.engine.snapTo
-								, i = "snap_center" === d20.engine.ruler_snapping && !e.altKey;
-							if (i |= "no_snap" === d20.engine.ruler_snapping && e.altKey,
-								i &= 0 !== d20.engine.snapTo) {
-								if ("square" === t)
-									d20.engine.measure.down[2] = d20.engine.snapToIncrement(d20.engine.measure.down[2] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2),
-										d20.engine.measure.down[3] = d20.engine.snapToIncrement(d20.engine.measure.down[3] + Math.floor(d20.engine.snapTo / 2), d20.engine.snapTo) - Math.floor(d20.engine.snapTo / 2);
-								else {
-									let e = d20.canvas_overlay.activeHexGrid.GetHexAt({
-										X: d20.engine.measure.down[2],
-										Y: d20.engine.measure.down[3]
-									});
-									e && (d20.engine.measure.down[3] = e.MidPoint.Y,
-										d20.engine.measure.down[2] = e.MidPoint.X)
-								}
-								d20.engine.measure.flags &= -3
-							} else if (n) {
-								if ("square" === t)
-									d20.engine.measure.down[2] = d20.engine.snapToIncrement(d20.engine.measure.down[2], d20.engine.snapTo),
-										d20.engine.measure.down[3] = d20.engine.snapToIncrement(d20.engine.measure.down[3], d20.engine.snapTo);
-								else {
-									let e = d20.engine.snapToHexCorner([d20.engine.measure.down[2], d20.engine.measure.down[3]]);
-									e && (d20.engine.measure.down[2] = e[0],
-										d20.engine.measure.down[3] = e[1])
-								}
-								d20.engine.measure.flags |= 2
-							} else
-								d20.engine.measure.flags |= 2;
-							var s = {
-								x: d20.engine.measure.down[0],
-								y: d20.engine.measure.down[1],
-								to_x: d20.engine.measure.down[2],
-								to_y: d20.engine.measure.down[3],
-								player: window.currentPlayer.id,
-								pageid: d20.Campaign.activePage().id,
-								currentLayer: window.currentEditingLayer,
-								waypoints: d20.engine.measure.waypoints,
-								sticky: d20.engine.measure.sticky,
-								flags: d20.engine.measure.flags,
-								hide: d20.engine.measure.hide
-								// BEGIN MOD
-								,
-								Ve: {
-									mode: $selMeasureMode.val(),
-									radius: {
-										mode: $selRadMode.val()
-									},
-									cone: {
-										arc: $iptConeWidth.val(),
-										mode: $selConeMode.val()
-									},
-									box: {
-										mode: $selBoxMode.val(),
-									},
-									line: {
-										mode: $selLineMode.val(),
-										width: $iptLineWidth.val()
-									}
-								}
-								// END MOD
-							};
-							d20.engine.announceMeasure(s)
-						} else if (d20.engine.leftMouseIsDown && "fxtools" == d20.engine.mode) {
-							if (d20.engine.fx.current) {
-								var l = (new Date).getTime();
-								l - d20.engine.fx.lastMoveBroadcast > d20.engine.fx.MOVE_BROADCAST_FREQ ? (d20.fx.moveFx(d20.engine.fx.current, o, r),
-									d20.engine.fx.lastMoveBroadcast = l) : d20.fx.moveFx(d20.engine.fx.current, o, r, !0)
-							}
-						} else if (d20.engine.leftMouseIsDown && "rect" == d20.engine.mode) {
-							var c = (n + d20.engine.currentCanvasOffset[0] - d20.engine.paddingOffset[0] - d20.engine.drawshape.start[0]) / d20.engine.canvasZoom
-								, u = (i + d20.engine.currentCanvasOffset[1] - d20.engine.paddingOffset[1] - d20.engine.drawshape.start[1]) / d20.engine.canvasZoom;
-							0 != d20.engine.snapTo && e.shiftKey && (c = d20.engine.snapToIncrement(c, d20.engine.snapTo),
-								u = d20.engine.snapToIncrement(u, d20.engine.snapTo));
-							var d = d20.engine.drawshape.shape;
-							d.width = c,
-								d.height = u,
-								d20.engine.renderTop()
-						}
-					} else
-						d20.engine.fog.down[2] = o,
-							d20.engine.fog.down[3] = r,
-						0 != d20.engine.snapTo && "square" == d20.Campaign.activePage().get("grid_type") && ("gridalign" == d20.engine.mode ? e.shiftKey && (d20.engine.fog.down[2] = d20.engine.snapToIncrement(d20.engine.fog.down[2], d20.engine.snapTo),
-							d20.engine.fog.down[3] = d20.engine.snapToIncrement(d20.engine.fog.down[3], d20.engine.snapTo)) : (e.shiftKey && !d20.Campaign.activePage().get("adv_fow_enabled") || !e.shiftKey && d20.Campaign.activePage().get("adv_fow_enabled")) && (d20.engine.fog.down[2] = d20.engine.snapToIncrement(d20.engine.fog.down[2], d20.engine.snapTo),
-							d20.engine.fog.down[3] = d20.engine.snapToIncrement(d20.engine.fog.down[3], d20.engine.snapTo))),
-							d20.engine.drawOverlays();
-					if (d20.engine.pinging)
-						(c = Math.abs(d20.engine.pinging.downx - n)) + (u = Math.abs(d20.engine.pinging.downy - i)) > 10 && (delete d20.engine.pings[window.currentPlayer.id],
-							d20.engine.pinging = !1);
-					if (d20.engine.pan.panning) {
-						c = 2 * (n - d20.engine.pan.panXY[0]),
-							u = 2 * (i - d20.engine.pan.panXY[1]);
-						if (d20.engine.pan.lastPanDist += Math.abs(c) + Math.abs(u),
-						d20.engine.pan.lastPanDist < 10)
-							return;
-						var h = d20.engine.pan.beginPos[0] - c
-							, p = d20.engine.pan.beginPos[1] - u;
-						a.stop().animate({
-							scrollLeft: h,
-							scrollTop: p
-						}, {
-							duration: 1500,
-							easing: "easeOutExpo",
-							queue: !1
-						})
-					}
-				}
-			};
-			// END ROLL20 CODE
-
-			if (UPPER_CANVAS_MOUSEMOVE) {
-				d20plus.log("Enhancing mouse move");
-				d20.engine.uppercanvas.removeEventListener("mousemove", UPPER_CANVAS_MOUSEMOVE);
-				d20.engine.uppercanvas.addEventListener("mousemove", A);
-			}
-		},
-
-		addLineCutterTool: () => {
-			const $btnTextTool = $(`.choosetext`);
-
-			const $btnSplitTool = $(`<li class="choosesplitter">✂️ Line Splitter</li>`).click(() => {
-				d20plus.setMode("line_splitter");
-			});
-
-			$btnTextTool.after($btnSplitTool);
-		},
-
-		_tokenHover: null,
-		_drawTokenHover: () => {
-			$(`.Vetools-token-hover`).remove();
-			if (!d20plus._tokenHover || !d20plus._tokenHover.text) return;
-
-			const pt = d20plus._tokenHover.pt;
-			const txt = unescape(d20plus._tokenHover.text);
-
-			const scaleFact = (1 / d20.engine.canvasZoom);
-			const xOffset = pt.x > (d20.engine.canvasWidth / 2) ? -300 * scaleFact : 0;
-
-			$(`body`).append(`<div class="Vetools-token-hover" style="top: ${pt.y}px; left: ${pt.x + xOffset}px">${txt}</div>`);
-		},
-		addTokenHover: () => {
-			// BEGIN ROLL20 CODE
-			d20.engine.drawOverlaysTop = function(e) {
-				e.globalCompositeOperation = "lighter";
-				d20.fx.render(e);
-				e.globalCompositeOperation = "source-over";
-				d20.engine.redrawSightTokens(e);
-				d20.engine.drawShadowMovements(e);
-				d20.engine.drawMeasurements(e);
-				d20.engine.drawPings(e);
-				d20.engine.drawInProgressDrawings(e);
-
-				// BEGIN MOD
-				d20plus._drawTokenHover();
-				// END MOD
-			};
-			// END ROLL20 CODE
-
-			// store data for the rendering function to access
-			d20.engine.canvas.on("mouse:move", (data, ...others) => {
-				// enable hover from GM layer -> token layer
-				let hoverTarget = data.target;
-				if (data.e && window.currentEditingLayer === "gmlayer") {
-					const cache = window.currentEditingLayer;
-					window.currentEditingLayer = "objects";
-					hoverTarget = d20.engine.canvas.findTarget(data.e, null, true);
-					window.currentEditingLayer = cache;
-				}
-
-				if (data.e.shiftKey && hoverTarget && hoverTarget.model) {
-					d20.engine.debounced_renderTop();
-					const gmNotes = hoverTarget.model.get("gmnotes");
-					const pt = d20.engine.canvas.getPointer(data.e);
-					pt.x -= d20.engine.currentCanvasOffset[0];
-					pt.y -= d20.engine.currentCanvasOffset[1];
-					d20plus._tokenHover = {
-						pt: pt,
-						text: gmNotes,
-						id: hoverTarget.model.id
-					};
-				} else {
-					if (d20plus._tokenHover) d20.engine.debounced_renderTop();
-					d20plus._tokenHover = null;
-				}
-			})
-		},
-
-		enhanceMarkdown: () => {
-			const OUT_STRIKE = "<span style='text-decoration: line-through'>$1</span>";
-
-			// BEGIN ROLL20 CODE
-			window.Markdown.parse = function(e) {
-					{
-						var t = e
-							, n = []
-							, i = [];
-						-1 != t.indexOf("\r\n") ? "\r\n" : -1 != t.indexOf("\n") ? "\n" : ""
-					}
-					return t = t.replace(/{{{([\s\S]*?)}}}/g, function(e) {
-						return n.push(e.substring(3, e.length - 3)),
-							"{{{}}}"
-					}),
-						t = t.replace(new RegExp("<pre>([\\s\\S]*?)</pre>","gi"), function(e) {
-							return i.push(e.substring(5, e.length - 6)),
-								"<pre></pre>"
-						}),
-						// BEGIN MOD
-						t = t.replace(/~~(.*?)~~/g, OUT_STRIKE),
-						// END MOD
-						t = t.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>"),
-						t = t.replace(/\*(.*?)\*/g, "<em>$1</em>"),
-						t = t.replace(/``(.*?)``/g, "<code>$1</code>"),
-						t = t.replace(/\[([^\]]+)\]\(([^)]+(\.png|\.gif|\.jpg|\.jpeg))\)/g, '<a href="$2"><img src="$2" alt="$1" /></a>'),
-						t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>'),
-						t = t.replace(new RegExp("<pre></pre>","g"), function() {
-							return "<pre>" + i.shift() + "</pre>"
-						}),
-						t = t.replace(/{{{}}}/g, function() {
-							return n.shift()
-						})
-				}
-			// END ROLL20 CODE
-
-			// after a short delay, replace any old content in the chat
-			setTimeout(() => {
-				$(`.message`).each(function () {
-					$(this).html($(this).html().replace(/~~(.*?)~~/g, OUT_STRIKE))
-				})
-			}, 2500);
-		},
-
-		enhancePathWidths () {
-			const $selThicc = $(`#path_width`).css("width", "150px");
-			$selThicc.append(`
-				<option value="5">Custom 1 (5 px.)</option>
-				<option value="5">Custom 2 (5 px.)</option>
-				<option value="5">Custom 3 (5 px.)</option>
-			`);
-			const $iptThicc = $(`<input type="number" style="max-width: 50px;">`).hide();
-			const $lblPixels = $(`<label style="display: inline-flex;"> pixels</label>`).hide();
-			$selThicc.after($lblPixels).after($iptThicc);
-
-			let $selOpt = null;
-			$selThicc.on("change", () => {
-				$selOpt = $selThicc.find(`option:selected`);
-				const txt = $selOpt.text();
-				if (txt.startsWith("Custom")) {
-					const thicc = /\((.*?) px\.\)/.exec(txt)[1];
-					$lblPixels.show();
-					$iptThicc.show().val(Number(thicc));
-				} else {
-					$lblPixels.hide();
-					$iptThicc.hide();
-				}
-			});
-
-			$iptThicc.on("keyup", () => {
-				if (!$selOpt) $selOpt = $selThicc.find(`option:selected`);
-				if ($selOpt) {
-					const clean = Math.round(Math.max(1, Number($iptThicc.val())));
-					$selOpt.val(`${clean}`);
-					$selOpt.text($selOpt.text().replace(/\(\d+ px\.\)/, `(${clean} px.)`));
-					d20.engine.canvas.freeDrawingBrush.width = clean;
-				}
-			});
-		},
-
-		// JOURNAL UI //////////////////////////////////////////////////////////////////////////////////////////////////////
-
-		lastClickedFolderId: null,
-
-		addJournalCommands: () => {
-			// Create new Journal commands
-			// stash the folder ID of the last folder clicked
-			$("#journalfolderroot").on("contextmenu", ".dd-content", function (e) {
-				if ($(this).parent().hasClass("dd-folder")) {
-					const lastClicked = $(this).parent();
-					d20plus.lastClickedFolderId = lastClicked.attr("data-globalfolderid");
-				}
-
-
-				if ($(this).parent().hasClass("character")) {
-					$(`.Vetools-make-tokenactions`).show();
-				} else {
-					$(`.Vetools-make-tokenactions`).hide();
-				}
-			});
-
-			var first = $("#journalitemmenu ul li").first();
-			// "Make Tokenactions" option
-			first.after(`<li class="Vetools-make-tokenactions" data-action-type="additem">Make Tokenactions</li>`);
-			$("#journalitemmenu ul").on(window.mousedowntype, "li[data-action-type=additem]", function () {
-				var id = $currentItemTarget.attr("data-itemid");
-				var character = d20.Campaign.characters.get(id);
-				d20plus.log("Making Token Actions..");
-				if (character) {
-					var npc = character.attribs.find(function (a) {
-						return a.get("name").toLowerCase() == "npc";
-					});
-					var isNPC = npc ? parseInt(npc.get("current")) : 0;
-					if (isNPC) {
-						//Npc specific tokenactions
-						character.abilities.create({
-							name: "Perception",
-							istokenaction: true,
-							action: d20plus.actionMacroPerception
-						});
-						character.abilities.create({
-							name: "DR/Immunities",
-							istokenaction: true,
-							action: d20plus.actionMacroDrImmunities
-						});
-						character.abilities.create({
-							name: "Stats",
-							istokenaction: true,
-							action: d20plus.actionMacroStats
-						});
-						character.abilities.create({
-							name: "Saves",
-							istokenaction: true,
-							action: d20plus.actionMacroSaves
-						});
-						character.abilities.create({
-							name: "Skill-Check",
-							istokenaction: true,
-							action: d20plus.actionMacroSkillCheck
-						});
-						character.abilities.create({
-							name: "Ability-Check",
-							istokenaction: true,
-							action: d20plus.actionMacroAbilityCheck
-						});
-					} else {
-						//player specific tokenactions
-						//@{selected|repeating_attack_$0_atkname}
-						character.abilities.create({
-							name: "Attack 1",
-							istokenaction: true,
-							action: "%{selected|repeating_attack_$0_attack}"
-						});
-						character.abilities.create({
-							name: "Attack 2",
-							istokenaction: true,
-							action: "%{selected|repeating_attack_$1_attack}"
-						});
-						character.abilities.create({
-							name: "Attack 3",
-							istokenaction: true,
-							action: "%{selected|repeating_attack_$2_attack}"
-						});
-						character.abilities.create({
-							name: "Tool 1",
-							istokenaction: true,
-							action: "%{selected|repeating_tool_$0_tool}"
-						});
-						//" + character.get("name") + "
-						character.abilities.create({
-							name: "Whisper GM",
-							istokenaction: true,
-							action: "/w gm ?{Message to whisper the GM?}"
-						});
-						character.abilities.create({
-							name: "Favorite Spells",
-							istokenaction: true,
-							action: "/w @{character_name} &{template:npcaction} {{rname=Favorite Spells}} {{description=Favorite Spells are the first spells in each level of your spellbook.\n\r[Cantrip](~selected|repeating_spell-cantrip_$0_spell)\n[1st Level](~selected|repeating_spell-1_$0_spell)\n\r[2nd Level](~selected|repeating_spell-2_$0_spell)\n\r[3rd Level](~selected|repeating_spell-3_$0_spell)\n\r[4th Level](~selected|repeating_spell-4_$0_spell)\n\r[5th Level](~selected|repeating_spell-5_$0_spell)}}"
-						});
-						character.abilities.create({
-							name: "Dual Attack",
-							istokenaction: false,
-							action: "%{selected|repeating_attack_$0_attack}\n\r%{selected|repeating_attack_$0_attack}"
-						});
-						character.abilities.create({
-							name: "Saves",
-							istokenaction: true,
-							action: "@{selected|wtype}&{template:simple} @{selected|rtype}?{Save|Strength, +@{selected|strength_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Strength Save&#125;&#125 {{mod=@{selected|strength_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|strength_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Dexterity, +@{selected|dexterity_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Dexterity Save&#125;&#125 {{mod=@{selected|dexterity_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|dexterity_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Constitution, +@{selected|constitution_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Constitution Save&#125;&#125 {{mod=@{selected|constitution_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|constitution_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Intelligence, +@{selected|intelligence_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Intelligence Save&#125;&#125 {{mod=@{selected|intelligence_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|intelligence_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Wisdom, +@{selected|wisdom_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Wisdom Save&#125;&#125 {{mod=@{selected|wisdom_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|wisdom_save_bonus}@{selected|pbd_safe}]]&#125;&#125; |Charisma, +@{selected|charisma_save_bonus}@{selected|pbd_safe}]]&#125;&#125; {{rname=Charisma Save&#125;&#125 {{mod=@{selected|charisma_save_bonus}&#125;&#125; {{r1=[[@{selected|d20}+@{selected|charisma_save_bonus}@{selected|pbd_safe}]]&#125;&#125;}@{selected|global_save_mod}@{selected|charname_output"
-						});
-						character.abilities.create({
-							name: "Skill-Check",
-							istokenaction: true,
-							action: "@{selected|wtype}&{template:simple} @{selected|rtype}?{Ability|Acrobatics, +@{selected|acrobatics_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Acrobatics&#125;&#125; {{mod=@{selected|acrobatics_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|acrobatics_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Animal Handling, +@{selected|animal_handling_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Animal Handling&#125;&#125; {{mod=@{selected|animal_handling_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|animal_handling_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Arcana, +@{selected|arcana_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Arcana&#125;&#125; {{mod=@{selected|arcana_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|arcana_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Athletics, +@{selected|athletics_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Athletics&#125;&#125; {{mod=@{selected|athletics_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|athletics_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Deception, +@{selected|deception_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Deception&#125;&#125; {{mod=@{selected|deception_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|deception_bonus}@{selected|pbd_safe} ]]&#125;&#125; |History, +@{selected|history_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=History&#125;&#125; {{mod=@{selected|history_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|history_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Insight, +@{selected|insight_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Insight&#125;&#125; {{mod=@{selected|insight_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|insight_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Intimidation, +@{selected|intimidation_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Intimidation&#125;&#125; {{mod=@{selected|intimidation_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|intimidation_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Investigation, +@{selected|investigation_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Investigation&#125;&#125; {{mod=@{selected|investigation_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|investigation_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Medicine, +@{selected|medicine_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Medicine&#125;&#125; {{mod=@{selected|medicine_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|medicine_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Nature, +@{selected|nature_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Nature&#125;&#125; {{mod=@{selected|nature_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|nature_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Perception, +@{selected|perception_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Perception&#125;&#125; {{mod=@{selected|perception_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|perception_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Performance, +@{selected|performance_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Performance&#125;&#125; {{mod=@{selected|performance_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|performance_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Persuasion, +@{selected|persuasion_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Persuasion&#125;&#125; {{mod=@{selected|persuasion_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|persuasion_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Religion, +@{selected|religion_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Religion&#125;&#125; {{mod=@{selected|religion_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|religion_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Sleight of Hand, +@{selected|sleight_of_hand_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Sleight of Hand&#125;&#125; {{mod=@{selected|sleight_of_hand_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|sleight_of_hand_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Stealth, +@{selected|stealth_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Stealth&#125;&#125; {{mod=@{selected|stealth_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|stealth_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Survival, +@{selected|survival_bonus}@{selected|pbd_safe} ]]&#125;&#125; {{rname=Survival&#125;&#125; {{mod=@{selected|survival_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|survival_bonus}@{selected|pbd_safe} ]]&#125;&#125; |Strength, +@{selected|strength_mod}@{selected|jack_attr}[STR]]]&#125;&#125; {{rname=Strength&#125;&#125; {{mod=@{selected|strength_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|strength_mod}@{selected|jack_attr}[STR]]]&#125;&#125; |Dexterity, +@{selected|dexterity_mod}@{selected|jack_attr}[DEX]]]&#125;&#125; {{rname=Dexterity&#125;&#125; {{mod=@{selected|dexterity_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|dexterity_mod}@{selected|jack_attr}[DEX]]]&#125;&#125; |Constitution, +@{selected|constitution_mod}@{selected|jack_attr}[CON]]]&#125;&#125; {{rname=Constitution&#125;&#125; {{mod=@{selected|constitution_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|constitution_mod}@{selected|jack_attr}[CON]]]&#125;&#125; |Intelligence, +@{selected|intelligence_mod}@{selected|jack_attr}[INT]]]&#125;&#125; {{rname=Intelligence&#125;&#125; {{mod=@{selected|intelligence_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|intelligence_mod}@{selected|jack_attr}[INT]]]&#125;&#125; |Wisdom, +@{selected|wisdom_mod}@{selected|jack_attr}[WIS]]]&#125;&#125; {{rname=Wisdom&#125;&#125; {{mod=@{selected|wisdom_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|wisdom_mod}@{selected|jack_attr}[WIS]]]&#125;&#125; |Charisma, +@{selected|charisma_mod}@{selected|jack_attr}[CHA]]]&#125;&#125; {{rname=Charisma&#125;&#125; {{mod=@{selected|charisma_mod}@{selected|jack_bonus}&#125;&#125; {{r1=[[ @{selected|d20} + @{selected|charisma_mod}@{selected|jack_attr}[CHA]]]&#125;&#125; } @{selected|global_skill_mod} @{selected|charname_output}"
-						});
-					}
-					//for everyone
-					character.abilities.create({
-						name: "Initiative",
-						istokenaction: true,
-						action: d20plus.actionMacroInit
-					});
-				}
-			});
-
-			// "Duplicate" option
-			first.after("<li data-action-type=\"cloneitem\">Duplicate</li>");
-			first.after("<li style=\"height: 10px;\">&nbsp;</li>");
-			$("#journalitemmenu ul").on(window.mousedowntype, "li[data-action-type=cloneitem]", function () {
-				var id = $currentItemTarget.attr("data-itemid");
-				var character = d20.Campaign.characters.get(id);
-				var handout = d20.Campaign.handouts.get(id);
-				d20plus.log("Duplicating..");
-				if (character) {
-					character.editview.render();
-					character.editview.$el.find("button.duplicate").trigger("click");
-				}
-				if (handout) {
-					handout.view.render();
-					var json = handout.toJSON();
-					delete json.id;
-					json.name = "Copy of " + json.name;
-					handout.collection.create(json, {
-						success: function (h) {
-							handout._getLatestBlob("gmnotes", function (gmnotes) {
-								h.updateBlobs({gmnotes: gmnotes});
-							});
-							handout._getLatestBlob("notes", function (notes) {
-								h.updateBlobs({notes: notes});
-							});
-						}
-					});
-				}
-			});
-
-			// New command on FOLDERS
-			var last = $("#journalmenu ul li").last();
-			last.after("<li style=\"background-color: #FA5050; color: white;\" data-action-type=\"fulldelete\">Delete Folder + Contents</li>");
-			$("#journalmenu ul").on(window.mousedowntype, "li[data-action-type=fulldelete]", function () {
-				d20plus.importer.recursiveRemoveDirById(d20plus.lastClickedFolderId, true);
-				d20plus.lastClickedFolderId = null;
-				$("#journalmenu").hide();
-			});
-		},
-
-		// FILESAVER ///////////////////////////////////////////////////////////////////////////////////////////////////
-		/*! @source http://purl.eligrey.com/github/FileSaver.js/blob/master/src/FileSaver.js */
-		saveAs: function() {
-			const view = window;
-			var
-				doc = view.document
-				// only get URL when necessary in case Blob.js hasn't overridden it yet
-				, get_URL = function() {
-					return view.URL || view.webkitURL || view;
-				}
-				, save_link = doc.createElementNS("http://www.w3.org/1999/xhtml", "a")
-				, can_use_save_link = "download" in save_link
-				, click = function(node) {
-					var event = new MouseEvent("click");
-					node.dispatchEvent(event);
-				}
-				, is_safari = /constructor/i.test(view.HTMLElement) || view.safari
-				, is_chrome_ios =/CriOS\/[\d]+/.test(navigator.userAgent)
-				, setImmediate = view.setImmediate || view.setTimeout
-				, throw_outside = function(ex) {
-					setImmediate(function() {
-						throw ex;
-					}, 0);
-				}
-				, force_saveable_type = "application/octet-stream"
-				// the Blob API is fundamentally broken as there is no "downloadfinished" event to subscribe to
-				, arbitrary_revoke_timeout = 1000 * 40 // in ms
-				, revoke = function(file) {
-					var revoker = function() {
-						if (typeof file === "string") { // file is an object URL
-							get_URL().revokeObjectURL(file);
-						} else { // file is a File
-							file.remove();
-						}
-					};
-					setTimeout(revoker, arbitrary_revoke_timeout);
-				}
-				, dispatch = function(filesaver, event_types, event) {
-					event_types = [].concat(event_types);
-					var i = event_types.length;
-					while (i--) {
-						var listener = filesaver["on" + event_types[i]];
-						if (typeof listener === "function") {
-							try {
-								listener.call(filesaver, event || filesaver);
-							} catch (ex) {
-								throw_outside(ex);
-							}
-						}
-					}
-				}
-				, auto_bom = function(blob) {
-					// prepend BOM for UTF-8 XML and text/* types (including HTML)
-					// note: your browser will automatically convert UTF-16 U+FEFF to EF BB BF
-					if (/^\s*(?:text\/\S*|application\/xml|\S*\/\S*\+xml)\s*;.*charset\s*=\s*utf-8/i.test(blob.type)) {
-						return new Blob([String.fromCharCode(0xFEFF), blob], {type: blob.type});
-					}
-					return blob;
-				}
-				, FileSaver = function(blob, name, no_auto_bom) {
-					if (!no_auto_bom) {
-						blob = auto_bom(blob);
-					}
-					// First try a.download, then web filesystem, then object URLs
-					var
-						filesaver = this
-						, type = blob.type
-						, force = type === force_saveable_type
-						, object_url
-						, dispatch_all = function() {
-							dispatch(filesaver, "writestart progress write writeend".split(" "));
-						}
-						// on any filesys errors revert to saving with object URLs
-						, fs_error = function() {
-							if ((is_chrome_ios || (force && is_safari)) && view.FileReader) {
-								// Safari doesn't allow downloading of blob urls
-								var reader = new FileReader();
-								reader.onloadend = function() {
-									var url = is_chrome_ios ? reader.result : reader.result.replace(/^data:[^;]*;/, 'data:attachment/file;');
-									var popup = view.open(url, '_blank');
-									if(!popup) view.location.href = url;
-									url=undefined; // release reference before dispatching
-									filesaver.readyState = filesaver.DONE;
-									dispatch_all();
-								};
-								reader.readAsDataURL(blob);
-								filesaver.readyState = filesaver.INIT;
-								return;
-							}
-							// don't create more object URLs than needed
-							if (!object_url) {
-								object_url = get_URL().createObjectURL(blob);
-							}
-							if (force) {
-								view.location.href = object_url;
-							} else {
-								var opened = view.open(object_url, "_blank");
-								if (!opened) {
-									// Apple does not allow window.open, see https://developer.apple.com/library/safari/documentation/Tools/Conceptual/SafariExtensionGuide/WorkingwithWindowsandTabs/WorkingwithWindowsandTabs.html
-									view.location.href = object_url;
-								}
-							}
-							filesaver.readyState = filesaver.DONE;
-							dispatch_all();
-							revoke(object_url);
-						};
-					filesaver.readyState = filesaver.INIT;
-
-					if (can_use_save_link) {
-						object_url = get_URL().createObjectURL(blob);
-						setImmediate(function() {
-							save_link.href = object_url;
-							save_link.download = name;
-							click(save_link);
-							dispatch_all();
-							revoke(object_url);
-							filesaver.readyState = filesaver.DONE;
-						}, 0);
-						return;
-					}
-
-					fs_error();
-				}
-				, FS_proto = FileSaver.prototype
-				, saveAs = function(blob, name, no_auto_bom) {
-					return new FileSaver(blob, name || blob.name || "download", no_auto_bom);
-				};
-			// IE 10+ (native saveAs)
-			if (typeof navigator !== "undefined" && navigator.msSaveOrOpenBlob) {
-				return function(blob, name, no_auto_bom) {
-					name = name || blob.name || "download";
-
-					if (!no_auto_bom) {
-						blob = auto_bom(blob);
-					}
-					return navigator.msSaveOrOpenBlob(blob, name);
-				};
-			}
-			FS_proto.abort = function(){};
-			FS_proto.readyState = FS_proto.INIT = 0;
-			FS_proto.WRITING = 1;
-			FS_proto.DONE = 2;
-			FS_proto.error =
-				FS_proto.onwritestart =
-					FS_proto.onprogress =
-						FS_proto.onwrite =
-							FS_proto.onabort =
-								FS_proto.onerror =
-									FS_proto.onwriteend =
-										null;
-
-			return saveAs;
-		}(),
-
-		// CSS /////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		baseCssRules: [
-			// generic
-			{
-				s: ".display-inline-block",
-				r: "display: inline-block;"
-			},
-			// // fix Roll20's <p> margins in the text editor // FIXME make this configurable
-			// {
-			// 	s: ".note-editable p",
-			// 	r: "margin-bottom: 0;"
-			// },
-			// page view enhancement
-			{
-				s: "#page-toolbar",
-				r: "height: calc(90vh - 40px);"
-			},
-			{
-				s: "#page-toolbar .container",
-				r: "height: 100%; white-space: normal;"
-			},
-			{
-				s: "#page-toolbar .pages .availablepage",
-				r: "width: 100px; height: 100px;"
-			},
-			{
-				s: "#page-toolbar .pages .availablepage img.pagethumb",
-				r: "max-width: 60px; max-height: 60px;"
-			},
-			{
-				s: "#page-toolbar .pages .availablepage span",
-				r: "bottom: 1px;"
-			},
-			// search
-			{
-				s: ".Vetoolsresult",
-				r: "background: #ff8080;"
-			},
-			// config editor
-			{
-				s: "div.config-table-wrapper",
-				r: "min-height: 200px; width: 100%; height: 100%; max-height: 460px; overflow-y: auto; transform: translateZ(0);"
-			},
-			{
-				s: "table.config-table",
-				r: "width: 100%; table-layout: fixed;"
-			},
-			{
-				s: "table.config-table tbody tr:nth-child(odd)",
-				r: "background-color: #f8f8f8;"
-			},
-			{
-				s: "table.config-table tbody td > *",
-				r: "vertical-align: middle; margin: 0;"
-			},
-			{
-				s: ".config-name",
-				r: "display: inline-block; line-height: 35px; width: 100%;"
-			},
-			// tool list
-			{
-				s: ".tools-list",
-				r: "max-height: 70vh;"
-			},
-			{
-				s: ".tool-row",
-				r: "min-height: 40px; display: flex; flex-direction: row; align-items: center;"
-			},
-			{
-				s: ".tool-row:nth-child(odd)",
-				r: "background-color: #f0f0f0;"
-			},
-			{
-				s: ".tool-row > *",
-				r: "flex-shrink: 0;"
-			},
-			// warning overlay
-			{
-				s: ".temp-warning",
-				r: "position: fixed; top: 12px; left: calc(50vw - 200px); z-index: 10000; width: 320px; background: transparent; color: red; font-weight: bold; font-size: 150%; font-variant: small-caps; border: 1px solid red; padding: 4px; text-align: center; border-radius: 4px;"
-			},
-			// GM hover text
-			{
-				s: ".Vetools-token-hover",
-				r: "pointer-events: none; position: fixed; z-index: 100000; background: white; padding: 5px 5px 0 5px; border-radius: 5px;     border: 1px solid #ccc; max-width: 450px;"
-			},
-			// drawing tools bar
-			{
-				s: "#drawingtools.line_splitter .currentselection:after",
-				r: "content: '✂️';"
-			},
-			// chat tag
-			{
-				s: ".userscript-hacker-chat",
-				r: "margin-left: -45px; margin-right: -5px; margin-bottom: -7px; margin-top: -15px; display: inline-block; font-weight: bold; font-family: 'Lucida Console', Monaco, monospace; color: #20C20E; background: black; padding: 3px;"
-			},
-			{
-				s: ".userscript-hacker-chat a",
-				r: "color: white;"
-			},
-			{
-				s: ".withoutavatars .userscript-hacker-chat",
-				r: "margin-left: -15px;"
-			},
-			// Bootstrap-alikes
-			{
-				s: ".col-1",
-				r: "width: 8.333%;"
-			},
-			{
-				s: ".col-2",
-				r: "width: 16.666%;"
-			},
-			{
-				s: ".col-3",
-				r: "width: 25%;"
-			},
-			{
-				s: ".col-4",
-				r: "width: 33.333%;"
-			},
-			{
-				s: ".col-5",
-				r: "width: 41.667%;"
-			},
-			{
-				s: ".col-6",
-				r: "width: 50%;"
-			},
-			{
-				s: ".col-7",
-				r: "width: 58.333%;"
-			},
-			{
-				s: ".col-8",
-				r: "width: 66.667%;"
-			},
-			{
-				s: ".col-9",
-				r: "width: 75%;"
-			},
-			{
-				s: ".col-10",
-				r: "width: 83.333%;"
-			},
-			{
-				s: ".col-11",
-				r: "width: 91.667%;"
-			},
-			{
-				s: ".col-12",
-				r: "width: 100%;"
-			},
-			{
-				s: ".ib",
-				r: "display: inline-block;"
-			},
-			// image rows
-			{
-				s: ".import-cb-label--img",
-				r: "display: flex; height: 64px; align-items: center; padding: 4px;"
-			},
-			{
-				s: ".import-label__img",
-				r: "display: inline-block; width: 60px; height: 60px; padding: 0 5px;"
-			},
-			// importer
-			{
-				s: ".import-cb-label",
-				r: "display: block; margin-right: -13px !important;"
-			},
-			{
-				s: ".import-cb-label span",
-				r: "display: inline-block; overflow: hidden; max-height: 18px; letter-spacing: -1px; font-size: 12px;"
-			},
-			{
-				s: ".import-cb-label span.readable",
-				r: "letter-spacing: initial"
-			},
-			{
-				s: ".import-cb-label .source",
-				r: "width: calc(16.667% - 28px);'"
-			},
-			// horizontal toolbar
-			{
-				s: "#secondary-toolbar:hover",
-				r: "opacity: 1 !important;"
-			},
-		],
-
-		baseCssRulesPlayer: [
-			{
-				s: ".player-hidden",
-				r: "display: none !important;"
-			}
-		],
-
-		cssRules: [], // other scripts should populate this
-
-		// HTML AND TEMPLATES //////////////////////////////////////////////////////////////////////////////////////////////
-
-		addHtmlHeader: () => {
-			d20plus.log("Add HTML");
-			const $body = $("body");
-
-			const $wrpSettings = $(`<div id="betteR20-settings"/>`);
-			$("#mysettings > .content").children("hr").first().before($wrpSettings);
-
-			$wrpSettings.append(d20plus.settingsHtmlHeader);
-			$body.append(d20plus.configEditorHTML);
-			if (window.is_gm) {
-				$(`#imagedialog`).find(`.searchbox`).find(`.tabcontainer`).first().after(d20plus.artTabHtml);
-				$(`a#button-add-external-art`).on(window.mousedowntype, d20plus.art.button);
-
-				$body.append(d20plus.addArtHTML);
-				$body.append(d20plus.addArtMassAdderHTML);
-				$body.append(d20plus.toolsListHtml);
-				$("#d20plus-artfolder").dialog({
-					autoOpen: false,
-					resizable: true,
-					width: 800,
-					height: 400,
-				});
-				$("#d20plus-artmassadd").dialog({
-					autoOpen: false,
-					resizable: true,
-					width: 800,
-					height: 400,
-				});
-			}
-			const $cfgEditor = $("#d20plus-configeditor");
-			$cfgEditor.dialog({
-				autoOpen: false,
-				resizable: true,
-				width: 800,
-				height: 650,
-			});
-			$cfgEditor.parent().append(d20plus.configEditorButtonBarHTML);
-
-			// shared GM/player conent
-			// quick search box
-			const $iptSearch = $(`<input id="player-search" class="ui-autocomplete-input" autocomplete="off" placeholder="Quick search by name...">`);
-			const $wrprResults = $(`<div id="player-search-results" class="content searchbox"/>`);
-
-			if (window.is_gm) {
-				$iptSearch.css("width", "calc(100% - 5px)");
-				const $addPoint = $("#journal").find("button.btn.superadd");
-				$addPoint.after($wrprResults);
-				$addPoint.after(`<br>`);
-				$addPoint.after($iptSearch);
-				$addPoint.after(`<br><br>`);
-			} else {
-				const $wrprControls = $(`<div class="content searchbox" id="search-wrp-controls"/>`);
-				$(`#journal .content`).before($wrprControls).before($wrprResults);
-				$iptSearch.css("max-width", "calc(100% - 140px)");
-				$wrprControls.append($iptSearch);
-			}
-			d20plus.initQuickSearch($iptSearch, $wrprResults);
-		},
-
-		addHtmlFooter: () => {
-			const $wrpSettings = $(`#betteR20-settings`);
-			$wrpSettings.append(d20plus.settingsHtmlPtFooter);
-
-			$("#mysettings > .content a#button-edit-config").on(window.mousedowntype, d20plus.openConfigEditor);
-			$("#button-manage-qpi").on(window.mousedowntype, qpi._openManager);
-			d20plus.addTools();
-		},
-
-		settingsHtmlPtFooter:
-			`<p>
-			<a class="btn " href="#" id="button-edit-config" style="margin-top: 3px; width: calc(100% - 22px);">Edit Config</a>
-			</p>
-			<p>
-			For help, advice, and updates, <a href="https://discord.gg/AzyBjtQ" target="_blank" style="color: #08c;">join our Discord!</a>
-			</p>
-			<p>
-			<a class="btn player-hidden" href="#" id="button-view-tools" style="margin-top: 3px; margin-right: 7px;">Open Tools List</a>
-			<a class="btn" href="#" id="button-manage-qpi" style="margin-top: 3px;" title="It's like the Roll20 API, but even less useful">Manage QPI Scripts</a>
-			</p>
-			<style id="dynamicStyle"></style>
-		`,
-
-		artTabHtml: `
-	<p><a class="btn" href="#" id="button-add-external-art">Manage External Art</a></p>
-	`,
-
-		addArtHTML: `
-	<div id="d20plus-artfolder" title="External Art" style="position: relative">
-	<p>Add external images by URL. Any direct link to an image should work.</p>
-	<p>
-	<input placeholder="Name*" id="art-list-add-name">
-	<input placeholder="URL*" id="art-list-add-url">
-	<a class="btn" href="#" id="art-list-add-btn">Add URL</a>
-	<a class="btn" href="#" id="art-list-multi-add-btn">Add Multiple URLs...</a>
-	<p/>
-	<hr>
-	<div id="art-list-container">
-	<input class="search" autocomplete="off" placeholder="Search list..." style="width: 100%;">
-	<br>
-	<p>
-		<span style="display: inline-block; width: 40%; font-weight: bold;">Name</span>
-		<span style="display: inline-block; font-weight: bold;">URL</span>
-	</p>
-	<ul class="list artlist" style="max-height: 600px; overflow-y: scroll; display: block; margin: 0; transform: translateZ(0);"></ul>
-	</div>
-	</div>`,
-
-		addArtMassAdderHTML: `
-	<div id="d20plus-artmassadd" title="Mass Add Art URLs">
-	<p>One entry per line; entry format: <b>[name]---[URL (direct link to image)]</b> <a class="btn" href="#" id="art-list-multi-add-btn-submit">Add URLs</a></p>
-	<p><textarea id="art-list-multi-add-area" style="width: 100%; height: 100%; min-height: 500px;" placeholder="My Image---http://pics.me/img1.png"></textarea></p>
-	</div>`,
-
-		artListHTML: `
-	<div id="Vetoolsresults">
-	<ol class="dd-list" id="image-search-none"><div class="alert white">No results found in 5etools for those keywords.</div></ol>
-	
-	<ol class="dd-list" id="image-search-has-results">
-		<li class="dd-item dd-folder Vetoolsresult">
-			<div class="dd-content">
-				<div class="folder-title">From 5etools</div>
-			</div>
-	
-			<ol class="dd-list Vetoolsresultfolder" id="custom-art-results"></ol>
-		</li>
-	</ol>
-	</div>`,
-
-		configEditorHTML: `
-	<div id="d20plus-configeditor" title="Config Editor" style="position: relative">
-	<!-- populate with js -->
-	</div>`,
-
-		configEditorButtonBarHTML: `
-	<div class="ui-dialog-buttonpane ui-widget-content ui-helper-clearfix">
-	<div class="ui-dialog-buttonset">
-		<button type="button" id="configsave" alt="Save" title="Save Config" class="btn" role="button" aria-disabled="false">
-			<span>Save</span>
-		</button>
-	</div>
-	</div>
-	`,
-
-		toolsListHtml: `
-		<div id="d20-tools-list" title="Tools List" style="position: relative">
-		<div class="tools-list">
-		<!-- populate with js -->
-		</div>
-		</div>
-		`,
-
-		template_TokenEditor: `
-	 <script id='tmpl_tokeneditor' type='text/html'>
-      <div class='dialog largedialog tokeneditor' style='display: block;'>
-        <ul class='nav nav-tabs'>
-          <li class='active'>
-            <a data-tab='basic' href='javascript:void(0);'>Basic</a>
-          </li>
-          <li>
-            <a data-tab='advanced' href='javascript:void(0);'>Advanced</a>
-          </li>
-        </ul>
-        <div class='tab-content'>
-          <div class='basic tab-pane'>
-            <div style='float: left; width: 300px;'>
-              <div style='float: right; margin-right: 85px; font-size: 1.2em; position: relative; top: -4px; cursor: help;'>
-                <a class='showtip pictos' title="You can choose to have the token represent a Character from the Journal. If you do, the token's name, controlling players, and bar values will be based on the Character. Most times you'll just leave this set to None/Generic.">?</a>
-              </div>
-              <label>Represents Character</label>
-              <select class='represents'>
-                <option value=''>None/Generic Token</option>
-                <$ _.each(window.Campaign.activeCharacters(), function(char) { $>
-                <option value="<$!char.id$>"><$!char.get("name")$></option>
-                <$ }); $>
-              </select>
-              <div class='clear'></div>
-              <div style='float: right; margin-right: 75px;'>
-                <label>
-                  <input class='showname' type='checkbox' value='1'>
-                  Show nameplate?
-                </label>
-              </div>
-              <label>Name</label>
-              <input class='name' style='width: 210px;' type='text'>
-              <div class='clear'></div>
-              <label>Controlled By</label>
-              <$ if(this.character) { $>
-              <p>(Determined by Character settings)</p>
-              <$ } else { $>
-              <select class='controlledby chosen' multiple='true'>
-                <option value='all'>All Players</option>
-                <$ window.Campaign.players.each(function(player) { $>
-                <option value="<$!player.id$>"><$!player.get("displayname")$></option>
-                <$ }); $>
-              </select>
-              <$ } $>
-              <div class='clear' style='height: 10px;'></div>
-              <label>
-                Tint Color
-              </label>
-              <input class='tint_color colorpicker' type='text'>
-              <div class='clear'></div>
-            </div>
-            <div style='float: left; width: 300px;'>
-              <label>
-                <span class='bar_color_indicator' style='background-color: <$!window.Campaign.get('bar1_color')$>'></span>
-                Bar 1
-              </label>
-              <div class='clear' style='height: 1px;'></div>
-              <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
-                <input class='bar1_value' type='text'>
-                /
-                <input class='bar1_max' type='text'>
-                <$ if(this.character) { $>
-                <div style='float: right;'>
-                  <select class='bar1_link' style='width: 125px;'>
-                    <option value=''>None</option>
-                    <$ _.each(this.tokensettingsview.availAttribs(), function(attrib) { $>
-                    <option value="<$!attrib.id$>"><$!attrib.name$>
-                    <$ }); $>
-                  </select>
-                  <a class='pictos showtip' style='font-size: 1.2em; position: relative; top: -5px; margin-left: 10px; cursor: help;' title='You can choose an Attribute from the Character this token represents. The values for this bar will be synced to the values of that Attribute.'>?</a>
-                </div>
-                <$ } $>
-              </div>
-              <span style='color: #888;'>(Leave blank for no bar)</span>
-              <div class='clear'></div>
-              <label>
-                <span class='bar_color_indicator' style='background-color: <$!window.Campaign.get('bar2_color')$>'></span>
-                Bar 2
-              </label>
-              <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
-                <input class='bar2_value' type='text'>
-                /
-                <input class='bar2_max' type='text'>
-                <$ if(this.character) { $>
-                <div style='float: right; margin-right: 30px;'>
-                  <select class='bar2_link' style='width: 125px;'>
-                    <option value=''>None</option>
-                    <$ _.each(this.tokensettingsview.availAttribs(), function(attrib) { $>
-                    <option value="<$!attrib.id$>"><$!attrib.name$>
-                    <$ }); $>
-                  </select>
-                </div>
-                <$ } $>
-              </div>
-              <span style='color: #888;'>(Leave blank for no bar)</span>
-              <div class='clear'></div>
-              <label>
-                <span class='bar_color_indicator' style='background-color: <$!window.Campaign.get('bar3_color')$>'></span>
-                Bar 3
-              </label>
-              <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
-                <input class='bar3_value' type='text'>
-                /
-                <input class='bar3_max' type='text'>
-                <$ if(this.character) { $>
-                <div style='float: right; margin-right: 30px;'>
-                  <select class='bar3_link' style='width: 125px;'>
-                    <option value=''>None</option>
-                    <$ _.each(this.tokensettingsview.availAttribs(), function(attrib) { $>
-                    <option value="<$!attrib.id$>"><$!attrib.name$>
-                    <$ }); $>
-                  </select>
-                </div>
-                <$ } $>
-              </div>
-              <span style='color: #888;'>(Leave blank for no bar)</span>
-              <div class='clear' style='height: 10px;'></div>
-              <div style='float: left; width: 130px;'>
-                <div style='float: right;'>
-                  <label>
-                    <input class='aura1_square' type='checkbox'>
-                    Square
-                  </label>
-                </div>
-                <label>
-                  Aura 1
-                </label>
-                <div class='inlineinputs' style='margin-top: 5px;'>
-                  <input class='aura1_radius' type='text'>
-                  <$!window.Campaign.activePage().get("scale_units")$>.
-                  <input class='aura1_color colorpicker' type='text'>
-                </div>
-              </div>
-              <div style='float: left; width: 130px; margin-left: 20px;'>
-                <div style='float: right;'>
-                  <label>
-                    <input class='aura2_square' type='checkbox'>
-                    Square
-                  </label>
-                </div>
-                <label>
-                  Aura 2
-                </label>
-                <div class='inlineinputs' style='margin-top: 5px;'>
-                  <input class='aura2_radius' type='text'>
-                  <$!window.Campaign.activePage().get("scale_units")$>.
-                  <input class='aura2_color colorpicker' type='text'>
-                </div>
-              </div>
-              <div class='clear'></div>
-            </div>
-            <div class='clear'></div>
-            <hr>
-            <h4>
-              GM Notes
-              <span style='font-weight: regular; font-size: 0.9em;'>(Only visible to GMs)</span>
-            </h4>
-            <textarea class='gmnotes summernote'></textarea>
-            <div class='clear'></div>
-            <label>&nbsp;</label>
-          </div>
-          <div class='advanced tab-pane'>
-            <div class='row-fluid'>
-              <div class='span6'>
-                <h4>Player Permissions</h4>
-                <div style='margin-left: 5px;'>
-                  <div class='inlineinputs'>
-                    <label style='width: 40px;'>Name</label>
-                    <label>
-                      <input class='showplayers_name' type='checkbox'>
-                      See
-                    </label>
-                    <label>
-                      <input class='playersedit_name' type='checkbox'>
-                      Edit
-                    </label>
-                  </div>
-                  <div class='clear' style='height: 5px;'></div>
-                  <div class='inlineinputs'>
-                    <label style='width: 40px;'>Bar 1</label>
-                    <label>
-                      <input class='showplayers_bar1' type='checkbox'>
-                      See
-                    </label>
-                    <label>
-                      <input class='playersedit_bar1' type='checkbox'>
-                      Edit
-                    </label>
-                  </div>
-                  <div class='clear' style='height: 5px;'></div>
-                  <div class='inlineinputs'>
-                    <label style='width: 40px;'>Bar 2</label>
-                    <label>
-                      <input class='showplayers_bar2' type='checkbox'>
-                      See
-                    </label>
-                    <label>
-                      <input class='playersedit_bar2' type='checkbox'>
-                      Edit
-                    </label>
-                  </div>
-                  <div class='clear' style='height: 5px;'></div>
-                  <div class='inlineinputs'>
-                    <label style='width: 40px;'>Bar 3</label>
-                    <label>
-                      <input class='showplayers_bar3' type='checkbox'>
-                      See
-                    </label>
-                    <label>
-                      <input class='playersedit_bar3' type='checkbox'>
-                      Edit
-                    </label>
-                  </div>
-                  <div class='clear' style='height: 5px;'></div>
-                  <div class='inlineinputs'>
-                    <label style='width: 40px;'>Aura 1</label>
-                    <label>
-                      <input class='showplayers_aura1' type='checkbox'>
-                      See
-                    </label>
-                    <label>
-                      <input class='playersedit_aura1' type='checkbox'>
-                      Edit
-                    </label>
-                  </div>
-                  <div class='clear' style='height: 5px;'></div>
-                  <div class='inlineinputs'>
-                    <label style='width: 40px;'>Aura 2</label>
-                    <label>
-                      <input class='showplayers_aura2' type='checkbox'>
-                      See
-                    </label>
-                    <label>
-                      <input class='playersedit_aura2' type='checkbox'>
-                      Edit
-                    </label>
-                  </div>
-                  <div class='clear' style='height: 10px;'></div>
-                  <small style='text-align: left; font-size: 0.9em;'>
-                    See: All Players can view
-                    <br>
-                    Edit: Controlling players can view and change
-                  </small>
-                </div>
-                <div class='clear'></div>
-              </div>
-              <div class='span6'>
-                <h4>Emits Light</h4>
-                <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
-                  <input class='light_radius' type='text'>
-                  <$!window.Campaign.activePage().get("scale_units")$>.
-                  <input class='light_dimradius' type='text'>
-                  <$!window.Campaign.activePage().get("scale_units")$>.
-                  <input class='light_angle' placeholder='360' type='text'>
-                  <span style='font-size: 2.0em;'>&deg;</span>
-                </div>
-                <span style='color: #888; padding-left: 5px;'>Light Radius / (optional) Start of Dim / Angle</span>
-                <div class='inlineinputs' style='margin-top: 5px;'>
-                  <label style='margin-left: 7px;'>
-                    <input class='light_otherplayers' type='checkbox'>
-                    All Players See Light
-                  </label>
-                </div>
-                <div class='inlineinputs' style='margin-top: 2px;'>
-                  <label style='margin-left: 7px;'>
-                    <input class='light_hassight' type='checkbox'>
-                    Has Sight
-                  </label>
-                  <span style="margin-left: 9px; margin-right: 28px;">/</span>
-                  Angle:
-                  <input class='light_losangle' placeholder='360' type='text'>
-                  <span style='font-size: 2.0em;'>&deg;</span>
-                </div>
-                <div class='inlineinputs' style='margin-left: 90px; margin-top: 5px;'>
-                  <span style="margin-left: 8px; margin-right: 12px;">/</span>
-                  Multiplyer:
-                  <input class='light_multiplier' placeholder='1.0' style='margin-right: 10px;' type='text'>x</input>
-                </div>
-                <h4>Advanced Fog of War</h4>
-                <div class='inlineinputs' style='margin-top: 5px; margin-bottom: 5px;'>
-                  <input class='advfow_viewdistance' type='text'>
-                  <$!window.Campaign.activePage().get("scale_units")$>.
-                </div>
-                <span style='color: #888; padding-left: 5px;'>View Distance</span>
-                <!-- %h4 -->
-                <!-- Token Actions -->
-                <!-- %a.pictos.showtip(style="margin-left: 15px; cursor: help; font-size: 1.1em; position: relative; top: -2px;" title="Choose from Macros and Abilities of linked Character to show when token is selected") ? -->
-                <!-- %p -->
-                <!-- %strong Add New Token Action: -->
-                <!-- %br -->
-                <!-- %select.chosen(placeholder="Choose from the list...") -->
-                <!-- %option(value="") Choose from the list... -->
-                <!-- <$ if(this.character) { $> -->
-                <!-- <optgroup label="Abilities"> -->
-                <!-- <$ this.character.abilities.each(function(abil) { $> -->
-                <!-- <option value="ability|<$!abil.get('id')$>"><$!abil.get('name')$></option> -->
-                <!-- <$ }); $> -->
-                <!-- </optgroup> -->
-                <!-- <$ } $> -->
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-	</script>
-	`,
-
-		template_pageSettings: `
-	<script id="tmpl_pagesettings" type="text/html">
-		  <label style='padding-top: 4px;'>
-			<strong>Page Size</strong>
-		  </label>
-		  X: <input type="number" class="width" style="width: 50px;" value="<$!this.model.get("width")$>" /> un. (<$!this.model.get("width") * 70$> px)
-		  <div style="margin-left: 110px; margin-top: 2px;">Y: <input type="number" class="height" style="width: 50px;" value="<$!this.model.get("height")$>" /> un. (<$!this.model.get("height") * 70$> px)</div>
-		  <small style='display: block; font-size: 0.9em; margin-left: 110px;'>width by height, 1 unit = 70 pixels</small>
-		  <div class='clear' style='height: 15px;'></div>
-		  <label style='margin-left: 55px; position: relative; top: 6px;'><strong>Scale:</strong> 1 unit =</label>
-		  <input type="number" class="scale_number" style="width: 35px;" value="<$!this.model.get("scale_number")$>" />
-		  <select class='scale_units' style='width: 65px; position: relative;'>
-			<option value='ft'>ft.</option>
-			<option value='m'>m.</option>
-			<option value='km'>km.</option>
-			<option value='mi'>mi.</option>
-			<option value='in'>in.</option>
-			<option value='cm'>cm.</option>
-			<option value='un'>un.</option>
-			<option value='hex'>hex</option>
-			<option value='sq'>sq.</option>
-			<option value='custom'>Custom...</option>
-		  </select>
-		  <div class='hidden' id='custom_scale_units'>
-			<label style='margin-left: 55px; position: relative; top: 6px;'><strong>Custom Unit</strong></label>
-			<input style='width: 60px;' type='text'>
-		  </div>
-		  <div class='clear' style='height: 15px;'></div>
-		  <label>
-			<strong>Background</strong>
-		  </label>
-		  <input class='pagebackground' type='text'>
-		  <hr>
-		  <label style='position: relative; top: 8px;'>
-			<strong>Grid</strong>
-		  </label>
-		  <label class='checkbox'>
-			<input class='gridenabled' type='checkbox' value='1'>
-			Enabled, Size:
-		  </label>
-		  <input type="number" class="snappingincrement" style="width: 35px;" value="<$!this.model.get("snapping_increment")$>" /> units
-		  <div class='clear' style='height: 7px;'></div>
-		  <label style='margin-left: 55px; position: relative; top: 4px;'>Type</label>
-		  <select id='gridtype' style='width: 100px;'>
-			<option selected value='square'>Square</option>
-			<option value='hex'>Hex (V)</option>
-			<option value='hexr'>Hex (H)</option>
-		  </select>
-		  <div class='clear' style='height: 7px;'></div>
-		  <label class='checkbox' id='hexlabels' style='margin-left: 130px;'>
-			<input class='gridlabels' type='checkbox' value='1'>&nbsp; Show Labels</input>
-		  </label>
-		  <div class='clear' style='height: 2px;'></div>
-		  <label style='margin-left: 55px; position: relative; top: 4px;'>
-			<a class='showtip pictos' href='https://wiki.roll20.net/Ruler' target='_blank'>?</a>
-			Measurement
-		  </label>
-		  <select id='diagonaltype' style='width: 100px;'>
-			<option class='squareonly' selected value='foure'>D&D 5E/4E Compatible</option>
-			<option class='squareonly' value='threefive'>Pathfinder/3.5E Compatible</option>
-			<option class='squareonly' value='manhattan'>Manhattan</option>
-			<option class='hexonly' value='hex'>Hex Path</option>
-			<option value='pythagorean'>Euclidean</option>
-		  </select>
-		  <div class='clear' style='height: 10px;'></div>
-		  <label style='margin-left: 55px;'>Color</label>
-		  <input class='gridcolor' type='text'>
-		  <div class='clear' style='height: 7px;'></div>
-		  <label style='margin-left: 55px;'>Opacity</label>
-		  <div class='gridopacity'></div>
-		  <div class='clear' style='height: 10px'></div>
-		  <hr>
-		  <label style='position: relative; top: -2px;'>
-			<strong>Fog of War</strong>
-		  </label>
-		  <label class='checkbox'>
-			<input class='darknessenabled' type='checkbox' value='1'>&nbsp; Enabled</input>
-		  </label>
-		  <hr>
-		  <strong style="display: block;"><i>Requires a paid subscription or all players to use a betteR20 script</i></strong>
-		  <label style='position: relative; top: 3px; width: 85px; padding-left: 15px;'>
-			<strong>Advanced Fog of War</strong>
-		  </label>
-		  <label class='checkbox'>
-			<input class='advancedfowenabled showtip' style='margin-top: 8px; margin-bottom: 8px;' type='checkbox' value='1'>&nbsp; Enabled</input>
-		  </label>
-		  <span class='no_grid' style='display: none;'>
-			, Size:
-			<input type="number" class="advancedfowgridsize" style="width: 30px;" value="<$!this.model.get("adv_fow_grid_size")$>" /> units
-		  </span>
-		  <br>
-		  <label class='checkbox'>
-			<input class='advancedfowshowgrid showtip' title='By default the Advanced Fog of War hides the map grid anywhere revealed but the player can no longer see because of Dynamic Lighting. This option makes the grid always visible.' type='checkbox' value='1'>&nbsp; Show Grid</input>
-		  </label>
-		  <br>
-		  <label class='checkbox' style='margin-left: 110px;'>
-			<input class='dimlightreveals showtip' title='By default the Advanced Fog of War will not be permanently revealed by Dynamic Lighting that is not bright. This option allows dim lighting to also reveal the fog.' type='checkbox' value='1'>&nbsp; Dim Light Reveals</input>
-		  </label>
-		  <br>
-		  <br>
-		  <label style='position: relative; top: -2px;'>
-			<strong>Dynamic Lighting</strong>
-		  </label>
-		  <label class='checkbox'>
-			<input class='lightingenabled showtip' type='checkbox' value='1'>&nbsp; Enabled</input>
-		  </label>
-		  <br>
-		  <label class='checkbox'>
-			<input class='lightenforcelos showtip' title="Player's line of sight set by what tokens they can control." type='checkbox' value='1'>&nbsp; Enforce Line of Sight</input>
-		  </label>
-		  <br>
-		  <br>
-		  <label class='checkbox' style='margin-left: 110px;'>
-			<input class='lightingupdate' type='checkbox' value='1'>&nbsp; Only Update on Drop</input>
-		  </label>
-		  <br>
-		  <label class='checkbox' style='margin-left: 110px;'>
-			<input class='lightrestrictmove' title="Don't allow player tokens to move through Dynamic Lighting walls. Can be enabled even if lighting is not used." type='checkbox' value='1'>&nbsp; Restrict Movement</input>
-		  </label>
-		  <br>
-		  <label class='checkbox' style='margin-left: 110px;'>
-			<input class='lightglobalillum' title='Instead of darkness show light in all places players can see.' type='checkbox' value='1'>&nbsp; Global Illumination</input>
-		  </label>
-		  <hr>
-		  <label style='font-weight: bold;'>GM Opacity</label>
-		  <div class='fogopacity'></div>
-		  <div class='clear'></div>
-		  <hr>
-		  <label style='font-weight: bold;'>Play on Load</label>
-		  <select class='pagejukeboxtrigger' style='width: 180px;'></select>
-		  <div class='clear'></div>
-		  <hr>
-		  <button class='delete btn btn-danger' style='float: right;'>
-			Delete Page
-		  </button>
-		  <button class='archive btn'>
-			Archive Page
-		  </button>
-		  <div class='clear'></div>
-	</script>
-	`,
-
-		template_actionsMenu: `
-	 <script id='tmpl_actions_menu' type='text/html'>
-      <div class='actions_menu d20contextmenu'>
-        <ul>
-          <$ if(this.view && this.view.graphic.type == "image" && this.get("cardid") !== "") { $>
-          <li class='head hasSub' data-action-type='takecard'>Take Card</li>
-          <li class='head hasSub' data-action-type='flipcard'>Flip Card</li>
-          <$ } $>
-          <$ if(window.is_gm) { $>
-          <$ if(this.view && this.get("isdrawing") === false && window.currentEditingLayer != "map") { $>
-          <!-- BEGIN MOD -->
-          <li class='head hasSub' data-menuname='massroll'>
-            Mass Roll &raquo;
-            <ul class='submenu' data-menuname='massroll'>
-              <li class='head hasSub' data-action-type='rollinit'>Initiative</li>
-         	  <li class='head hasSub' data-action-type='rollsaves'>Save</li>
-         	  <li class='head hasSub' data-action-type='rollskills'>Skill</li>
-            </ul>
-          </li>
-          <!-- END MOD -->
-          <li class='head hasSub' data-action-type='addturn'>Add Turn</li>
-          <$ } $>
-          <li class='head'>Edit</li>
-          <$ if(this.view) { $>
-          <li data-action-type='delete'>Delete</li>
-          <li data-action-type='copy'>Copy</li>
-          <$ } $>
-          <li data-action-type='paste'>Paste</li>
-          <li data-action-type='undo'>Undo</li>
-          <$ if(this.view) { $>
-          <li data-action-type='tofront'>To Front</li>
-          <!-- BEGIN MOD -->
-          <li data-action-type='forward-one'>Forward One<!-- (B-F)--></li>
-          <li data-action-type='back-one'>Back One<!-- (B-B)--></li>
-          <!-- END MOD -->
-          <li data-action-type='toback'>To Back</li>
-          <li class='head hasSub' data-menuname='advanced'>
-            Advanced &raquo;
-            <ul class='submenu' data-menuname='advanced'>
-              <li data-action-type='group'>Group</li>
-              <li data-action-type='ungroup'>Ungroup</li>
-              <$ if(this.get("type") == "image") { $>
-              <li class="<$ if (this && this.get("isdrawing")) { $>active<$ } $>" data-action-type="toggledrawing">Is Drawing</li>
-              <li class="<$ if (this && this.get("fliph")) { $>active<$ } $>" data-action-type="togglefliph">Flip Horizontal</li>
-              <li class="<$ if (this && this.get("flipv")) { $>active<$ } $>" data-action-type="toggleflipv">Flip Vertical</li>
-              <li data-action-type='setdimensions'>Set Dimensions</li>
-              <$ if(window.currentEditingLayer == "map") { $>
-              <li data-action-type='aligntogrid'>Align to Grid</li>
-              <$ } $>
-              <$ } $>
-            </ul>
-          </li>
-          <li class='head hasSub' data-menuname='positioning'>
-            Layer &raquo;
-            <ul class='submenu' data-menuname='positioning'>
-              <li data-action-type="tolayer_map" class='<$ if(this && this.get("layer") == "map") { $>active<$ } $>'>Map Layer</li>
-              <li data-action-type="tolayer_objects" class='<$ if(this && this.get("layer") == "objects") { $>active<$ } $>'>Token Layer</li>
-              <li data-action-type="tolayer_gmlayer" class='<$ if(this && this.get("layer") == "gmlayer") { $>active<$ } $>'>GM Layer</li>
-              <li data-action-type="tolayer_walls" class='<$ if(this && this.get("layer") == "walls") { $>active<$ } $>'>Lighting Layer (will not block LoS)</li>
-            </ul>
-          </li>
-          <$ } $>
-          <$ } $>
-          <$ if(this.view && this.get("sides") !== "" && this.get("cardid") === "") { $>
-          <li class='head hasSub' data-menuname='mutliside'>
-            Multi-Sided &raquo;
-            <ul class='submenu' data-menuname='multiside'>
-              <li data-action-type='side_random'>Random Side</li>
-              <li data-action-type='side_choose'>Choose Side</li>
-              <li data-action-type='rollertokenresize'>Set Side Size</li>
-            </ul>
-          </li>
-          <$ } $>
-        </ul>
-      </div>
-    </script>
-		`,
-
-		template_charactereditor: `
- <script id='tmpl_charactereditor' type='text/html'>
-     <div class='dialog largedialog charactereditor' style='display: block;'>
-        <div class='tab-content'>
-          <div class='bioinfo tab-pane'>
-            <div class='row-fluid'>
-              <div class='span5'>
-                <label>
-                  <strong>Avatar</strong>
-                </label>
-                <$ if(true) { $>
-                <div class="avatar dropbox <$! this.get("avatar") != "" ? "filled" : "" $>" style="width: 95%;">
-                <div class="status"></div>
-                <div class="inner">
-                <$ if(this.get("avatar") == "") { $>
-                <h4 style="padding-bottom: 0px; marigin-bottom: 0px; color: #777;">Drop a file<small>(JPG, PNG, GIF)</small></h4>
-                <br /> or
-                <button class="btn">Choose a file...</button>
-                <input class="manual" type="file" />
-                <$ } else { $>
-                <img src="<$!this.get("avatar")$>" draggable="false" />
-                <div class='remove'><a href='#'>Remove</a></div>
-                <$ } $>
-                </div>
-                </div>
-                <$ } else { $>
-                <div class='avatar'>
-                <$ if(this.get("avatar") != "") { $>
-                <img src="<$!this.get("avatar")$>" draggable="false" />
-                <$ } $>
-                </div>
-                <$ } $>
-                <div class='clear'></div>
-                <!-- BEGIN MOD -->
-                <button class="btn character-image-by-url">Set Image from URL</button>
-                <div class='clear'></div>
-                <!-- END MOD -->
-                <$ if (window.is_gm) { $>
-                <label>
-                  <strong>Default Token (Optional)</strong>
-                </label>
-                <div class="defaulttoken tokenslot <$! this.get("defaulttoken") !== "" ? "filled" : "" $> style="width: 95%;">
-                <$ if(this.get("defaulttoken") !== "") { $>
-                <img src="" draggable="false" />
-                <div class="remove"><a href="#">Remove</a></div>
-                <$ } else { $>
-                <button class="btn">Use Selected Token</button>
-                <small>Select a token on the tabletop to use as the Default Token</small>
-                <$ } $>
-                </div>
-                <!-- BEGIN MOD -->
-                <button class="btn token-image-by-url">Set Token Image from URL</button>
-                <small style="text-align: left;">(Update will only be visible upon re-opening the sheet)</small>
-                <div class='clear'></div>
-                <!-- END MOD -->
-                <$ } $>
-              </div>
-              <div class='span7'>
-                <label>
-                  <strong>Name</strong>
-                </label>
-                <input class='name' type='text'>
-                <div class='clear'></div>
-                <$ if(window.is_gm) { $>
-                <label>
-                  <strong>In Player's Journals</strong>
-                </label>
-                <select class='inplayerjournals chosen' multiple='true' style='width: 100%;'>
-                  <option value="all">All Players</option>
-                  <$ window.Campaign.players.each(function(player) { $>
-                  <option value="<$!player.id$>"><$!player.get("displayname")$></option>
-                  <$ }); $>
-                </select>
-                <div class='clear'></div>
-                <label>
-                  <strong>Can Be Edited &amp; Controlled By</strong>
-                </label>
-                <select class='controlledby chosen' multiple='true' style='width: 100%;'>
-                  <option value="all">All Players</option>
-                  <$ window.Campaign.players.each(function(player) { $>
-                  <option value="<$!player.id$>"><$!player.get("displayname")$></option>
-                  <$ }); $>
-                </select>
-                <div class='clear'></div>
-                <label>
-                  <strong>Tags</strong>
-                </label>
-                <input class='tags'>
-                <div class='clear'></div>
-                <hr>
-                <button class='delete btn btn-danger' style='float: right;'>
-                  Delete
-                </button>
-                <button class='duplicate btn' style='margin-right: 10px;'>
-                  Duplicate
-                </button>
-                <button class='archive btn'>
-                  <$ if(this.get("archived")) { $>Restore from Archive<$ } else { $>Archive<$ } $>
-                </button>
-                <div class='clear'></div>
-                <$ } $>
-                <div class='clear'></div>
-              </div>
-            </div>
-            <div class='row-fluid'>
-              <div class='span12'>
-                <hr>
-                <label>
-                  <strong>Bio & Info</strong>
-                </label>
-                <textarea class='bio'></textarea>
-                <div class='clear'></div>
-                <$ if(window.is_gm) { $>
-                <label>
-                  <strong>GM Notes (Only visible to GM)</strong>
-                </label>
-                <textarea class='gmnotes'></textarea>
-                <div class='clear'></div>
-                <$ } $>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </script>		
-		`,
-
-		template_handouteditor: `
-			<script id='tmpl_handouteditor' type='text/html'>
-      <div class='dialog largedialog handouteditor' style='display: block;'>
-        <div class='row-fluid'>
-          <div class='span12'>
-            <label>
-              <strong>Name</strong>
-            </label>
-            <input class='name' type='text'>
-            <div class='clear'></div>
-            <$ if (window.is_gm) { $>
-            <label>
-              <strong>In Player's Journals</strong>
-            </label>
-            <select class='inplayerjournals chosen' multiple='true' style='width: 100%;'>
-              <option value="all">All Players</option>
-              <$ window.Campaign.players.each(function(player) { $>
-              <option value="<$!player.id$>"><$!player.get("displayname")$></option>
-              <$ }); $>
-            </select>
-            <div class='clear'></div>
-            <label>
-              <strong>Can Be Edited By</strong>
-            </label>
-            <select class='controlledby chosen' multiple='true' style='width: 100%;'>
-              <option value="all">All Players</option>
-              <$ window.Campaign.players.each(function(player) { $>
-              <option value="<$!player.id$>"><$!player.get("displayname")$></option>
-              <$ }); $>
-            </select>
-            <div class='clear'></div>
-            <label>
-              <strong>Tags</strong>
-            </label>
-            <input class='tags'>
-            <div class='clear'></div>
-            <$ } $>
-          </div>
-        </div>
-        <div class='row-fluid'>
-          <div class='span12'>
-            <div class="avatar dropbox <$! this.get("avatar") != "" ? "filled" : "" $>">
-            <div class="status"></div>
-            <div class="inner">
-            <$ if(this.get("avatar") == "") { $>
-            <h4 style="padding-bottom: 0px; marigin-bottom: 0px; color: #777;">Drop a file</h4>
-            <br /> or
-            <button class="btn">Choose a file...</button>
-            <input class="manual" type="file" />
-            <$ } else { $>
-            <img src="<$!this.get("avatar")$>" />
-            <div class='remove'><a href='#'>Remove</a></div>
-            <$ } $>
-            </div>
-            </div>
-            <div class='clear'></div>
-          </div>
-        </div>
-        <!-- BEGIN MOD -->
-        <div class='row-fluid'>
-		<button class="btn handout-image-by-url">Set Image from URL</button>
-		<div class='clear'></div>
-		</div>
-		<!-- END MOD -->
-        <div class='row-fluid'>
-          <div class='span12'>
-            <label>
-              <strong>Description & Notes</strong>
-            </label>
-            <textarea class='notes'></textarea>
-            <div class='clear'></div>
-            <$ if(window.is_gm) { $>
-            <label>
-              <strong>GM Notes (Only visible to GM)</strong>
-            </label>
-            <textarea class='gmnotes'></textarea>
-            <div class='clear'></div>
-            <hr>
-            <button class='delete btn btn-danger' style='float: right;'>
-              Delete Handout
-            </button>
-            <button class='archive btn'>
-              <$ if(this.get("archived")) { $>Restore Handout from Archive<$ } else { $>Archive Handout<$ } $>
-            </button>
-            <div class='clear'></div>
-            <$ } $>
-          </div>
-        </div>
-      </div>
-    </script>
-		`,
-	};
 };
 
 const D20plus = function (version) {
@@ -15185,7 +15601,7 @@ const D20plus = function (version) {
 
 	// Window loaded
 	function doBootstrap () {
-		d20plus.log("Bootstrapping...");
+		d20plus.ut.log("Bootstrapping...");
 
 		let hasRunInit = false;
 		function defaultOnload () {
@@ -15198,7 +15614,7 @@ const D20plus = function (version) {
 					d20plus.Init();
 				}
 			}, 1000);
-		};
+		}
 
 		window.onload = defaultOnload;
 
@@ -15206,10 +15622,10 @@ const D20plus = function (version) {
 			// r20es will expose the d20 variable if we wait
 			// this should always trigger after window.onload has fired, but track init state just in case
 			(function waitForD20 () {
-				if (typeof(window.d20) !== "undefined" && !$("#loading-overlay").is(":visible") && !hasRunInit) {
+				if (typeof window.d20 !== "undefined" && !$("#loading-overlay").is(":visible") && !hasRunInit) {
 					hasRunInit = true;
 					window.unwatch("d20ext");
-					d20plus.log("Setting production (alt)...");
+					d20plus.ut.log("Setting production (alt)...");
 					window.d20ext.environment = "production";
 					d20.environment = "production";
 					d20plus.Init();
@@ -15220,9 +15636,9 @@ const D20plus = function (version) {
 		} else {
 			window.d20 = {};
 			window.watch("d20", function (id, oldValue, newValue) {
-				d20plus.log("Obtained d20 variable");
+				d20plus.ut.log("Obtained d20 variable");
 				window.unwatch("d20ext");
-				d20plus.log("Setting production...");
+				d20plus.ut.log("Setting production...");
 				window.d20ext.environment = "production";
 				newValue.environment = "production";
 				return newValue;
@@ -15230,13 +15646,13 @@ const D20plus = function (version) {
 		}
 
 		window.d20plus = d20plus;
-		d20plus.log("Injected");
+		d20plus.ut.log("Injected");
 	}
 
 	window.d20ext = {};
 	window.watch("d20ext", function (id, oldValue, newValue) {
 		if (!window.enhancementSuiteEnabled && newValue.environment !== "development") {
-			d20plus.log("Set Development");
+			d20plus.ut.log("Set Development");
 			newValue.environment = "development";
 			Object.defineProperty(newValue, 'seenad', {
 				value: true
